@@ -326,6 +326,7 @@ Usage: gasslight <command>
   restart                 restart the panel and the portal
   logs [N]                last N log lines (default 100)
   reset-password [user]   set a new random password (default user: admin)
+  api-key <cmd> [arg]     manage REST API v1 tokens: create [label] | list | revoke <id>
   update                  update to the latest version from GitHub
   uninstall [--purge]     remove the panel and portal (VPN users keep working)
 EOF
@@ -376,6 +377,57 @@ os.replace(tmp, path)
 PY
         echo "Username: $name"
         echo "Password: $pw"
+        ;;
+    api-key)
+        need_root api-key
+        sub="${2:-list}"
+        arg="${3:-}"
+        PANEL_DIR="$PANEL_DIR" SUB="$sub" ARG="$arg" python3 - <<'PY'
+import hashlib, json, os, secrets, sys, time
+path = os.path.join(os.environ["PANEL_DIR"], "api_keys.json")
+sub = os.environ["SUB"]
+arg = os.environ["ARG"].strip()
+data = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {"keys": []}
+keys = data.get("keys", []) if isinstance(data, dict) else []
+
+def save(items):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"keys": items}, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+if sub == "create":
+    label = (arg or "bot")[:64]
+    raw = "gl_" + secrets.token_urlsafe(32)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    key_id = secrets.token_hex(6)
+    keys.append({"id": key_id, "label": label, "owner": "cli", "hash": digest, "created": int(time.time())})
+    save(keys)
+    print(f"ID   : {key_id}")
+    print(f"Label: {label}")
+    print(f"Token: {raw}")
+    print("(Save this token now - it cannot be shown again.)")
+elif sub == "list":
+    if not keys:
+        print("No API keys configured.")
+    else:
+        for k in keys:
+            print(f"{k.get('id','-')}  label={k.get('label','-')}  owner={k.get('owner','-')}  created={k.get('created','-')}")
+elif sub == "revoke":
+    if not arg:
+        print("Usage: gasslight api-key revoke <id>", file=sys.stderr)
+        sys.exit(1)
+    kept = [k for k in keys if k.get("id") != arg]
+    if len(kept) == len(keys):
+        print(f"Token not found: {arg}", file=sys.stderr)
+        sys.exit(1)
+    save(kept)
+    print(f"Revoked API key: {arg}")
+else:
+    print("Usage: gasslight api-key create [label] | list | revoke <id>", file=sys.stderr)
+    sys.exit(1)
+PY
         ;;
     update)
         need_root update

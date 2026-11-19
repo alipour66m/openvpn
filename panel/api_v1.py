@@ -176,7 +176,7 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
         blocked = sum(1 for u in users if u.get("blocked") or u.get("disabled"))
         return jsonify(
             ok=True,
-            api_version="1.0",
+            api_version="1.1",
             app=deps["APP_NAME"],
             now=time.time(),
             users_total=len(users),
@@ -210,15 +210,34 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
             daily = round(float(body.get("daily") or 0), 3)
             total = round(float(body.get("total") or 0), 3)
             mport = int(body["port"]) if (manual and body.get("port") is not None) else None
+            min_port = int(body["min_port"]) if body.get("min_port") is not None else None
         except (TypeError, ValueError):
             return _err("invalid numeric parameter", 400)
 
         oa = str(body.get("ovpn_addr") or "").strip()
         disabled = bool(body.get("disabled", False))
 
+        def _pick_min_port(st_obj: dict[str, Any], start_floor: int, proto_val: str) -> int | None:
+            skip = {8088, 8089, 2096, 8443}
+            used_ports = [int(x.get("port", 0)) for x in st_obj.get("users", []) if isinstance(x.get("port"), int)]
+            highest = max(used_ports) if used_ports else 0
+            start = max(start_floor, highest + 1)
+            for p in range(start, 65536):
+                if p not in skip and deps["port_error"](st_obj, p, proto_val) is None:
+                    return p
+            for p in range(start_floor, min(start, 65536)):
+                if p not in skip and deps["port_error"](st_obj, p, proto_val) is None:
+                    return p
+            return None
+
         with lock:
             st = deps["load_state"]()
-            port = mport if (manual and mport is not None) else deps["next_port"](st)
+            if manual and mport is not None:
+                port = mport
+            elif min_port is not None and 1 <= min_port <= 65535:
+                port = _pick_min_port(st, min_port, proto)
+            else:
+                port = deps["next_port"](st)
             err = None
             if not deps["host_ready"]():
                 err = "openvpn host is not ready (server.crt missing)"

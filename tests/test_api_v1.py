@@ -284,7 +284,31 @@ class ApiV1TestCase(unittest.TestCase):
 
         st_resp = self.call("GET", "/api/v1/status", headers=bearer)
         self.assertEqual(st_resp.status_code, 200)
+        self.assertEqual(st_resp.get_json()["api_version"], "1.1")
         self.assertEqual(st_resp.get_json()["users_total"], 1)
+
+        # min_port allocates sequentially above existing user ports (and above floor)
+        m_resp = self.call(
+            "POST",
+            "/api/v1/users",
+            json_body={"name": "ovpn_u2", "proto": "udp", "min_port": 3000},
+            headers=bearer,
+        )
+        self.assertEqual(m_resp.status_code, 201)
+        self.assertEqual(m_resp.get_json()["user"]["port"], 3000)
+
+        m2_resp = self.call(
+            "POST",
+            "/api/v1/users",
+            json_body={"name": "ovpn_u3", "proto": "tcp", "min_port": 2222},
+            headers=bearer,
+        )
+        self.assertEqual(m2_resp.status_code, 201)
+        self.assertEqual(m2_resp.get_json()["user"]["port"], 3001)
+
+        # Cleanup extra users
+        self.assertEqual(self.call("DELETE", "/api/v1/users/ovpn_u2", headers=bearer).status_code, 200)
+        self.assertEqual(self.call("DELETE", "/api/v1/users/ovpn_u3", headers=bearer).status_code, 200)
 
         # Delete user
         del_resp = self.call("DELETE", "/api/v1/users/ovpn_u1", headers=bearer)

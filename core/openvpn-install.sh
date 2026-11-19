@@ -323,6 +323,10 @@ user nobody
 group $group_name
 persist-key
 persist-tun
+ignore-unknown-option disable-dco
+disable-dco
+tun-mtu 1400
+mssfix 1360
 verb 3
 crl-verify crl.pem" >> /etc/openvpn/server/server.conf
 if [[ "$protocol" = "udp" ]]; then
@@ -333,10 +337,17 @@ fi
 # Forwarding + firewall/NAT
 # ----------------------------------------------------------------------------
 
-# Enable net.ipv4.ip_forward for the system
-echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-openvpn-forward.conf
-# Enable without waiting for a reboot or service restart
-echo 1 > /proc/sys/net/ipv4/ip_forward
+# Enable net.ipv4.ip_forward and high-capacity tuning (500+ TUN instances)
+cat <<'SYSCTL_EOF' > /etc/sysctl.d/99-openvpn-forward.conf
+net.ipv4.ip_forward=1
+fs.file-max=524288
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.neigh.default.gc_thresh1=2048
+net.ipv4.neigh.default.gc_thresh2=4096
+net.ipv4.neigh.default.gc_thresh3=8192
+SYSCTL_EOF
+sysctl --system >/dev/null 2>&1 || echo 1 > /proc/sys/net/ipv4/ip_forward
 if [[ -n "$ip6" ]]; then
 	# Enable net.ipv6.conf.all.forwarding for the system
 	echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-openvpn-forward.conf
@@ -423,6 +434,8 @@ persist-key
 persist-tun
 remote-cert-tls server
 auth SHA512
+tun-mtu 1400
+mssfix 1360
 ignore-unknown-option block-outside-dns
 verb 3" > /etc/openvpn/server/client-common.txt
 
