@@ -293,7 +293,8 @@ EOF
 }
 
 install_cli() {
-    cat > "$BIN_DIR/gasslight" <<'CLI_EOF'
+    local cli_tmp="$BIN_DIR/.gasslight.tmp.$$"
+    cat > "$cli_tmp" <<'CLI_EOF'
 #!/usr/bin/env bash
 # gasslight - small management command for the GassLight panel
 set -Eeuo pipefail
@@ -459,8 +460,9 @@ PY
         ;;
 esac
 CLI_EOF
-    sed -i "s|__ETC_DIR__|$ETC_DIR|" "$BIN_DIR/gasslight"
-    chmod 755 "$BIN_DIR/gasslight"
+    sed -i "s|__ETC_DIR__|$ETC_DIR|" "$cli_tmp"
+    chmod 755 "$cli_tmp"
+    mv -f "$cli_tmp" "$BIN_DIR/gasslight"
 }
 
 deploy() {
