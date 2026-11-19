@@ -199,7 +199,7 @@ TR = {
   "f_edit_ok": "User {name} updated", "f_edit_id": "ID must be a positive number that no other user uses",
   "f_edit_lim": "Limits must be between 0 and 1000000 GB",
   "f_edit_fail": "Update failed, previous settings were restored: {err}", "f_reset_ok": "Usage of {name} was reset",
-  "blk_daily": "Blocked: daily limit", "blk_total": "Blocked: total limit", "lim_daily": "Daily", "lim_total": "Total",
+  "blk_daily": "Blocked: daily limit", "blk_total": "Blocked: total limit", "blk_manual": "Disabled manually", "lim_daily": "Daily", "lim_total": "Total",
   "u_local_ip": "Local IP", "u_last": "Last connection", "u_online": "Online", "u_offline": "Offline",
   "u_never": "Never connected", "u_since": "since", "u_today": "Today", "u_daily_lim": "Daily limit",
   "u_total_lim": "Total limit", "u_nolimit": "No limit", "ago_now": "just now", "ago_min": "{n} min ago",
@@ -294,7 +294,7 @@ TR = {
   "f_edit_ok": "کاربر {name} به‌روز شد", "f_edit_id": "ID باید عدد مثبتی باشه که کاربر دیگه‌ای ازش استفاده نمی‌کنه",
   "f_edit_lim": "سقف‌ها باید بین ۰ تا ۱۰۰۰۰۰۰ گیگابایت باشن",
   "f_edit_fail": "به‌روزرسانی ناموفق بود، تنظیمات قبلی برگشت: {err}", "f_reset_ok": "مصرف {name} صفر شد",
-  "blk_daily": "مسدود: سقف روزانه", "blk_total": "مسدود: سقف کلی", "lim_daily": "روزانه", "lim_total": "کلی",
+  "blk_daily": "مسدود: سقف روزانه", "blk_total": "مسدود: سقف کلی", "blk_manual": "غیرفعال دستی", "lim_daily": "روزانه", "lim_total": "کلی",
   "u_local_ip": "آی‌پی لوکال", "u_last": "آخرین اتصال", "u_online": "آنلاین", "u_offline": "آفلاین",
   "u_never": "هیچ‌وقت وصل نشده", "u_since": "از", "u_today": "امروز", "u_daily_lim": "سقف روزانه",
   "u_total_lim": "سقف کلی", "u_nolimit": "بدون سقف", "ago_now": "همین الان", "ago_min": "{n} دقیقه پیش",
@@ -1489,6 +1489,8 @@ def daily_bytes(rec):
 
 
 def limit_reason(u, rec):
+    if u.get("disabled"):
+        return "manual"
     rec = rec or {}
     if u.get("limit_total") and rec.get("up", 0) + rec.get("down", 0) >= u["limit_total"] * GB:
         return "total"
@@ -4245,7 +4247,7 @@ USAGE_HTML = """
 <script>
 var I={{ jt('port','d_ago','u_none','th_created','th_down','th_up','th_total','th_share','th_live','u_local_ip','u_last',
  'u_online','u_offline','u_never','u_since','u_today','u_daily_lim','u_total_lim','u_nolimit','ago_now','ago_min','ago_h','ago_d',
- 'blk_daily','blk_total')|tojson }};
+ 'blk_daily','blk_total','blk_manual')|tojson }};
 var IC={{ icj('down','up','clock','server','calendar','activity','slash')|tojson }};
 var GB=1073741824,$=function(i){return document.getElementById(i)};
 function fb(n){var u=['B','KB','MB','GB','TB'],i=0;while(n>=1024&&i<4){n/=1024;i++}return n.toFixed(i?2:0)+' '+u[i]}
@@ -4489,6 +4491,14 @@ setTimeout(poll,1500);
 <div><button class="btn">{{ ic('check',16) }} {{ t('px_save') }}</button></div></form>
 </div>
 """
+
+
+try:
+    from api_v1 import register_api_v1
+except ImportError:
+    from panel.api_v1 import register_api_v1
+
+register_api_v1(app, globals())
 
 
 if __name__ == "__main__":

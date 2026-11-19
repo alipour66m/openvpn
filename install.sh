@@ -19,7 +19,7 @@ set -Eeuo pipefail
 
 # =============================================================== settings ====
 # >>> Before publishing: put your own GitHub "user/repo" here <<<
-DEFAULT_REPO="mahanamini/openvpn"
+DEFAULT_REPO="alipour66m/openvpn"
 
 PANEL_DIR="${PANEL_DIR:-/opt/ovpn-panel}"            # panel code + all its data (users, usage, .ovpn files)
 PORTAL_DIR="${PORTAL_DIR:-/opt/gasslight-portal}"    # portal code
@@ -392,7 +392,7 @@ PY
         rm -f "$SYSTEMD_DIR/ovpn-panel.service" "$SYSTEMD_DIR/gasslight-portal.service"
         systemctl daemon-reload || true
         rm -rf "$PORTAL_DIR"
-        rm -f "$PANEL_DIR/panel.py"
+        rm -f "$PANEL_DIR/panel.py" "$PANEL_DIR/api_v1.py"
         if [[ "${2:-}" == "--purge" ]]; then
             rm -rf "$PANEL_DIR" "$ETC_DIR"
             rm -f "$BIN_DIR/gasslight"
@@ -414,6 +414,7 @@ CLI_EOF
 deploy() {
     install -d -m 700 "$PANEL_DIR"
     install -m 600 "$SRC/panel/panel.py" "$PANEL_DIR/panel.py"
+    install -m 600 "$SRC/panel/api_v1.py" "$PANEL_DIR/api_v1.py"
     install -d -m 755 "$PORTAL_DIR"
     install -m 644 "$SRC/portal/portal.py" "$PORTAL_DIR/portal.py"
     install -d -m 755 "$ETC_DIR"
