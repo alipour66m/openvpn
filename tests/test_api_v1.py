@@ -320,6 +320,18 @@ class ApiV1TestCase(unittest.TestCase):
         self.assertEqual(rev.status_code, 200)
         self.assertEqual(self.call("GET", "/api/v1/users", headers=bearer).status_code, 401)
 
+    def test_all_required_deps_exist_in_real_panel_py(self) -> None:
+        with open(os.path.join(ROOT, "panel", "panel.py"), encoding="utf-8") as f:
+            panel_src = f.read()
+        with open(os.path.join(ROOT, "panel", "api_v1.py"), encoding="utf-8") as f:
+            api_src = f.read()
+        required_keys = sorted(set(re.findall(r'deps\["([^"]+)"\]', api_src)))
+        missing = [
+            k for k in required_keys
+            if not re.search(rf'(?:^def {re.escape(k)}\b|^{re.escape(k)}\s*=)', panel_src, re.M)
+        ]
+        self.assertEqual(missing, [], f"api_v1.py references missing panel.py symbols: {missing}")
+
 
 if __name__ == "__main__":
     unittest.main()

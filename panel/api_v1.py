@@ -83,7 +83,8 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
             cn = dict(deps["CONN"].get(name, {}))
             ru, rd = deps["RATES"].get(name, (0, 0))
             du, dd = deps["daily_bytes"](rec)
-        portal_token = deps["portal_token"](u) if include_portal else None
+        portal_fn = deps.get("portal_token")
+        portal_token = (portal_fn(u) if callable(portal_fn) else u.get("token")) if include_portal else None
         blocked = u.get("blocked")
         disabled = bool(u.get("disabled"))
         expires = u.get("expires")
