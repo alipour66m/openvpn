@@ -24,6 +24,13 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from flask import (Flask, abort, flash, jsonify, redirect, render_template_string,
                    request, send_file, session, url_for)
 
+try:
+    from routing import (BYPASS_PRESETS, DEFAULT_SMART_PORTS, DNS_PRESETS, SMART_PRESETS,
+                         RoutingManager, conf_with_max_clients, extract_sni_or_host, parse_backup_remote)
+except ImportError:
+    from panel.routing import (BYPASS_PRESETS, DEFAULT_SMART_PORTS, DNS_PRESETS, SMART_PRESETS,
+                               RoutingManager, conf_with_max_clients, extract_sni_or_host, parse_backup_remote)
+
 APP_NAME = "GassLight"
 BASE = os.environ.get("PANEL_DATA", "/opt/ovpn-panel")
 DB = f"{BASE}/users.json"
@@ -511,6 +518,37 @@ TR["en"].update({
  "dash_restart_confirm": "Restart the panel? It will be unavailable for a few seconds (OpenVPN services are not touched).",
  "dash_restarting": "Restarting...", "dash_logs": "Last 50 server logs", "dash_logs_view": "View logs",
  "dash_logs_none": "No logs found", "dash_copy": "Copy", "dash_close": "Close",
+ "c_mc": "Max devices (1-50)", "edit_mc": "Max concurrent devices (1-50)", "f_mc": "Max devices must be between 1 and 50",
+ "edit_dns": "Per-user DNS override (optional IPv4 list)", "edit_dns_ph": "Leave empty for server default",
+ "edit_remotes": "Per-user backup remotes (one per line, optional)", "edit_remotes_ph": "backup.example.com:443",
+ "devices": "devices", "kick_btn": "Disconnect", "confirm_kick": "Disconnect active session(s) of {name}?",
+ "f_kicked": "Disconnected {n} active session(s) of {name}", "f_kick_fail": "No active session found or disconnect failed",
+ "nav_adv_rt": "Smart Routing & Shield", "ux_sr": "Enable smart domain routing",
+ "rt_dns_title": "Smart DNS Presets", "rt_dns_desc": "Apply fast, ad-blocking, or Iran-friendly DNS presets across all users cleanly.",
+ "rt_dns_preset": "Preset", "rt_dns_custom": "Custom IPs", "rt_dns_apply": "Apply DNS",
+ "rt_bp_title": "Split-Tunnel Direct Bypass (Banks & Local Sites)", "rt_bp_desc": "Push net_gateway routes so Iranian banks and essential services bypass the VPN automatically without changing .ovpn files. Capped safely for iOS.",
+ "rt_bp_enable": "Enable direct bypass routes", "rt_bp_presets": "Curated domain & bank presets",
+ "rt_bp_cidrs": "Custom IPs / CIDRs (one per line)", "rt_bp_doms": "Custom direct bypass domains (one per line)",
+ "rt_bp_max": "Max routes cap (iOS safe max 250)", "rt_bp_hours": "Auto DNS refresh interval (hours)",
+ "rt_bp_resolve": "Resolve Domains Now", "rt_bp_stats": "{n} routes pushed (last DNS refresh: {ts})",
+ "rt_sm_title": "Smart Server-Side Domain/SNI Routing & WARP", "rt_sm_desc": "Peek TLS SNI & HTTP Host so ONLY selected domains (AI, Streaming, Custom) exit via WARP / Exit Server / Proxy while all other traffic goes direct at full speed.",
+ "rt_sm_enable": "Enable smart domain routing", "rt_sm_mode": "Routing mode",
+ "rt_sm_m_dom": "Selected domains only (AI / Streaming / Custom)", "rt_sm_m_all": "All traffic (matching ports)",
+ "rt_sm_target": "Outbound target", "rt_sm_t_auto": "Auto (Exit Servers -> WARP -> Proxy)",
+ "rt_sm_t_warp": "Local Cloudflare WARP SOCKS5", "rt_sm_t_exit": "Exit Servers (SOCKS5)", "rt_sm_t_proxy": "Proxy List",
+ "rt_sm_warp_h": "WARP SOCKS5 host", "rt_sm_warp_p": "WARP SOCKS5 port",
+ "rt_sm_warp_ok": "WARP SOCKS5 online ({ms} ms)", "rt_sm_warp_bad": "WARP SOCKS5 offline (run wgcf / warp-svc on port {port})",
+ "rt_sm_presets": "Smart domain presets", "rt_sm_doms": "Custom smart domains (one per line)", "rt_sm_ports": "Intercepted TCP ports",
+ "rt_sm_all": "Apply to all users (uncheck to enable per-user in Edit)",
+ "rt_ab_title": "One-Click Anti-Abuse Firewall", "rt_ab_desc": "Protect server IP reputation on tun+ interfaces cleanly using dedicated GASSLIGHT_ABUSE iptables chain.",
+ "rt_ab_enable": "Enable anti-abuse firewall", "rt_ab_smtp": "Block outbound SMTP port 25 (anti-spam)",
+ "rt_ab_smtp_alt": "Also block SMTPS / Submission ports 465 & 587", "rt_ab_p2p": "Block BitTorrent / P2P ports & trackers",
+ "rt_ab_dpi": "Enable deep torrent signature inspection (xt_string)", "rt_ab_ports": "Extra blocked ports (comma/space separated)",
+ "rt_rm_title": "Multi-Remote Failover (.ovpn)", "rt_rm_desc": "Embed backup IPs / Iran tunnel endpoints dynamically into every downloaded .ovpn with fast failover timers.",
+ "rt_rm_enable": "Enable backup remotes in .ovpn downloads", "rt_rm_list": "Backup remotes (host, host:port, or host:port:proto)",
+ "rt_rm_rand": "Randomize server order (remote-random)", "rt_rm_rmin": "Retry min (s)", "rt_rm_rmax": "Retry max (s)", "rt_rm_to": "Connect timeout (s)",
+ "f_rt_saved": "Routing settings saved", "f_rt_resolved": "Resolved {ok}/{tot} domains -> {routes} collapsed routes pushed",
+ "f_ab_saved": "Anti-abuse firewall updated ({rules} active rules)",
 })
 TR["fa"].update({
  "dash_online": "کاربران آنلاین هم‌اکنون", "dash_latency": "Latency", "dash_chart": "نمودار مصرف کاربران",
@@ -520,6 +558,37 @@ TR["fa"].update({
  "dash_restart_confirm": "پنل ری‌استارت بشه؟ چند ثانیه در دسترس نیست (سرویس‌های OpenVPN دست نمی‌خورن).",
  "dash_restarting": "در حال راه‌اندازی مجدد...", "dash_logs": "آخرین لاگ‌های سرور (۵۰ مورد اخیر)",
  "dash_logs_view": "مشاهده لاگ‌ها", "dash_logs_none": "لاگی پیدا نشد", "dash_copy": "کپی", "dash_close": "بستن",
+ "c_mc": "تعداد کاربر/دستگاه (۱ تا ۵۰)", "edit_mc": "حداکثر دستگاه همزمان (۱ تا ۵۰)", "f_mc": "تعداد دستگاه همزمان باید بین ۱ تا ۵۰ باشد",
+ "edit_dns": "DNS اختصاصی کاربر (اختیاری)", "edit_dns_ph": "خالی = DNS پیش‌فرض سرور",
+ "edit_remotes": "آدرس‌های پشتیبان اختصاصی (هر خط یکی، اختیاری)", "edit_remotes_ph": "backup.example.com:443",
+ "devices": "دستگاه", "kick_btn": "قطع اتصال", "confirm_kick": "نشست(های) فعال {name} قطع شوند؟",
+ "f_kicked": "{n} نشست فعال {name} قطع شد", "f_kick_fail": "نشست فعالی پیدا نشد یا قطع اتصال ناموفق بود",
+ "nav_adv_rt": "مسیریابی هوشمند و سپر", "ux_sr": "فعال‌سازی مسیریابی هوشمند دامنه (AI / SNI)",
+ "rt_dns_title": "پریست‌های هوشمند DNS", "rt_dns_desc": "تنظیم سریع DNS ضدتبلیغ (AdGuard)، عبور از تحریم (شکن/الکترو) یا Cloudflare برای کل کاربران.",
+ "rt_dns_preset": "انتخاب سریع (Preset)", "rt_dns_custom": "آی‌پی‌های دلخواه", "rt_dns_apply": "اعمال DNS",
+ "rt_bp_title": "دور زدن مستقیم سایت‌های بانکی و داخلی (Split-Tunnel)", "rt_bp_desc": "ارسال مسیر مستقیم (net_gateway) به کاربران تا سایت‌های بانکی و داخلی بدون نیاز به تغییر فایل .ovpn مستقیم باز شوند (محدودیت ایمن برای آیفون).",
+ "rt_bp_enable": "فعال‌سازی بایپس مستقیم بانکی و داخلی", "rt_bp_presets": "بسته‌های آماده دامنه‌ها و بانک‌ها",
+ "rt_bp_cidrs": "رنج IP یا CIDR دلخواه (هر خط یکی)", "rt_bp_doms": "دامنه‌های دلخواه برای اتصال مستقیم (هر خط یکی)",
+ "rt_bp_max": "سقف تعداد Route (برای پایداری iOS حداکثر ۲۵۰)", "rt_bp_hours": "بازه بروزرسانی خودکار DNS دامنه‌ها (ساعت)",
+ "rt_bp_resolve": "بروزرسانی فوری IP دامنه‌ها", "rt_bp_stats": "{n} مسیر فعال (آخرین بروزرسانی: {ts})",
+ "rt_sm_title": "مسیریابی هوشمند دامنه‌ها (TLS SNI) و WARP", "rt_sm_desc": "بررسی هوشمند دامنه مقصد تا فقط سایت‌های منتخب (هوش مصنوعی، استریم یا دلخواه) از سرور خروجی/WARP رد شوند و بقیه با سرعت کامل مستقیم بروند.",
+ "rt_sm_enable": "فعال‌سازی مسیریابی هوشمند دامنه", "rt_sm_mode": "حالت مسیریابی",
+ "rt_sm_m_dom": "فقط دامنه‌های منتخب (هوش مصنوعی / استریم / دلخواه)", "rt_sm_m_all": "کل ترافیک پورت‌های منتخب",
+ "rt_sm_target": "مسیر خروجی هدف", "rt_sm_t_auto": "خودکار (سرور خروجی -> WARP -> پروکسی)",
+ "rt_sm_t_warp": "کلودفلر WARP لوکال (SOCKS5)", "rt_sm_t_exit": "سرورهای خروجی (SOCKS5)", "rt_sm_t_proxy": "لیست پروکسی‌ها",
+ "rt_sm_warp_h": "هاست WARP SOCKS5", "rt_sm_warp_p": "پورت WARP SOCKS5",
+ "rt_sm_warp_ok": "WARP متصل و آماده ({ms} ms)", "rt_sm_warp_bad": "WARP روی پورت {port} در دسترس نیست (نصب نشده یا خاموش)",
+ "rt_sm_presets": "بسته‌های دامنه هوشمند", "rt_sm_doms": "دامنه‌های هوشمند دلخواه (هر خط یکی)", "rt_sm_ports": "پورت‌های TCP مورد بررسی",
+ "rt_sm_all": "اعمال برای همه کاربران (خاموش = انتخاب تکی در ویرایش کاربر)",
+ "rt_ab_title": "فایروال ضداَبیوز و امنیت سرور (یک‌کلیکی)", "rt_ab_desc": "جلوگیری از اسپم ایمیل و دانلود تورنت روی اینترفیس tun+ با زنجیره مستقل GASSLIGHT_ABUSE برای جلوگیری از بن شدن IP سرور.",
+ "rt_ab_enable": "فعال‌سازی فایروال ضداَبیوز", "rt_ab_smtp": "مسدودسازی پورت اسپم ایمیل SMTP (25)",
+ "rt_ab_smtp_alt": "مسدودسازی پورت‌های ایمیل 465 و 587", "rt_ab_p2p": "مسدودسازی پورت‌ها و ترکرهای تورنت / P2P",
+ "rt_ab_dpi": "تشخیص عمیق ترافیک تورنت (xt_string)", "rt_ab_ports": "پورت‌های مسدود اضافه (با کاما یا فاصله)",
+ "rt_rm_title": "آدرس‌های پشتیبان و Failover در .ovpn", "rt_rm_desc": "افزودن خودکار IP/تانل پشتیبان و تایمرهای سوئیچ سریع به فایل‌های .ovpn هنگام دانلود یا تب URL.",
+ "rt_rm_enable": "فعال‌سازی Failover چند آدرسه در دانلود .ovpn", "rt_rm_list": "آدرس‌های پشتیبان (host، host:port یا host:port:proto)",
+ "rt_rm_rand": "انتخاب تصادفی سرور (remote-random)", "rt_rm_rmin": "حداقل تأخیر تلاش مجدد (ثانیه)", "rt_rm_rmax": "حداکثر تأخیر (ثانیه)", "rt_rm_to": "مهلت اتصال (ثانیه)",
+ "f_rt_saved": "تنظیمات مسیریابی ذخیره و اعمال شد", "f_rt_resolved": "{ok} از {tot} دامنه بروزرسانی شد -> {routes} مسیر فشرده اعمال گردید",
+ "f_ab_saved": "فایروال ضداَبیوز بروزرسانی شد ({rules} قانون فعال)",
 })
 
 
@@ -608,8 +677,10 @@ def _read_state():
         u.setdefault("limit_daily", None)
         u.setdefault("limit_total", None)
         u.setdefault("blocked", None)
+        u.setdefault("max_clients", 1)
         u.setdefault("px", False)
         u.setdefault("ex", False)
+        u.setdefault("sr", False)
     st.pop("next_id", None)
     st.pop("last_port", None)
     return st
@@ -758,15 +829,15 @@ def build_ovpn(name, port, dst, proto="udp"):
     os.chmod(dst, 0o600)
 
 
-def create_instance(name, port, sub, proto="udp"):
+def create_instance(name, port, sub, proto="udp", max_clients=1):
     env = dict(os.environ, EASYRSA_CERT_EXPIRE="3650")
     r = run(["./easyrsa", "--batch", "build-client-full", name, "nopass"], cwd=ED, env=env)
     if r.returncode != 0:
         return False, ((r.stderr or r.stdout)[-400:] or "easyrsa failed")
-    return activate_instance(name, port, sub, proto)
+    return activate_instance(name, port, sub, proto, max_clients=max_clients)
 
 
-def activate_instance(name, port, sub, proto="udp", revoke_on_fail=True, cleanup_on_fail=True):
+def activate_instance(name, port, sub, proto="udp", revoke_on_fail=True, cleanup_on_fail=True, max_clients=1):
     conf = open(f"{SERVER_DIR}/server.conf").read()
     conf = re.sub(r"^port .*", lambda m: f"port {port}", conf, flags=re.M)
     conf = re.sub(r"^server .*", lambda m: f"server {sub}.0 255.255.255.0", conf, flags=re.M)
@@ -776,15 +847,25 @@ def activate_instance(name, port, sub, proto="udp", revoke_on_fail=True, cleanup
         conf = conf.rstrip("\n") + f"\nproto {proto}\n"
     if proto == "tcp":
         conf = re.sub(r"^explicit-exit-notify.*\n?", "", conf, flags=re.M)
-    conf = re.sub(r"^ifconfig-pool-persist .*", lambda m: f"ifconfig-pool-persist ipp-{name}.txt",
-                  conf, flags=re.M)
+    mc = max(1, min(50, int(max_clients or 1)))
+    conf = conf_with_max_clients(conf, name, mc)
     conf = conf.rstrip("\n") + f"\nclient-config-dir ccd-{name}\nccd-exclusive\n{mgmt_line(name)}\n"
     os.makedirs(f"{SERVER_DIR}/ccd-{name}", exist_ok=True)
     open(f"{SERVER_DIR}/ccd-{name}/{name}", "a").close()
+    if "ROUTING" in globals() and globals()["ROUTING"] is not None:
+        try:
+            globals()["ROUTING"].sync_user_ccd(name)
+        except Exception:
+            pass
     with open(f"{SERVER_DIR}/{name}.conf", "w") as f:
         f.write(conf)
 
     apply_rules(sub, port, proto)
+    if "ROUTING" in globals() and globals()["ROUTING"] is not None:
+        try:
+            globals()["ROUTING"].sync_abuse_rules()
+        except Exception:
+            pass
     run(["ufw", "allow", f"{port}/{proto}"])
     run(["systemctl", "enable", "--now", f"openvpn-server@{name}"])
     time.sleep(1.5)
@@ -799,9 +880,43 @@ def activate_instance(name, port, sub, proto="udp", revoke_on_fail=True, cleanup
     return True, ""
 
 
-def edit_instance(u, new_id, new_port, new_proto):
+def edit_instance(u, new_id, new_port, new_proto, new_max_clients=None):
     name = u["name"]
     old_port, old_sub, old_proto = u["port"], u["subnet"], u.get("proto", "udp")
+    old_mc = max(1, min(50, int(u.get("max_clients") or 1)))
+    mc = old_mc if new_max_clients is None else max(1, min(50, int(new_max_clients or 1)))
+    if new_id == u["id"] and new_port == old_port and new_proto == old_proto:
+        if mc == old_mc:
+            return True, ""
+        conf_path = f"{SERVER_DIR}/{name}.conf"
+        try:
+            old_conf = open(conf_path).read()
+        except OSError as e:
+            return False, str(e)
+        new_conf = conf_with_max_clients(old_conf, name, mc)
+        with open(conf_path, "w") as f:
+            f.write(new_conf)
+        if mc > 1 and os.path.exists(f"{SERVER_DIR}/ipp-{name}.txt"):
+            try:
+                os.remove(f"{SERVER_DIR}/ipp-{name}.txt")
+            except OSError:
+                pass
+        if not u.get("blocked"):
+            run(["systemctl", "restart", f"openvpn-server@{name}"])
+            time.sleep(1.5)
+            if not is_active(name):
+                with open(conf_path, "w") as f:
+                    f.write(old_conf)
+                run(["systemctl", "restart", f"openvpn-server@{name}"])
+                return False, tr("f_svc", log=run(["journalctl", "-u", f"openvpn-server@{name}", "-n", "8", "--no-pager"]).stdout[-500:])
+        u["max_clients"] = mc
+        with SLOCK:
+            if name in USAGE:
+                USAGE[name]["sk"] = None
+                USAGE[name].pop("sessions", None)
+            CONN.pop(name, None)
+        return True, ""
+
     sub = old_sub
     if new_id != u["id"]:
         others = {"users": [x for x in load_state()["users"] if x["name"] != name]}
@@ -809,19 +924,20 @@ def edit_instance(u, new_id, new_port, new_proto):
     run(["systemctl", "stop", f"openvpn-server@{name}"])
     drop_rules(old_sub, old_port, old_proto)
     run(["ufw", "delete", "allow", f"{old_port}/{old_proto}"])
-    if sub != old_sub and os.path.exists(f"{SERVER_DIR}/ipp-{name}.txt"):
+    if (sub != old_sub or mc > 1) and os.path.exists(f"{SERVER_DIR}/ipp-{name}.txt"):
         os.remove(f"{SERVER_DIR}/ipp-{name}.txt")
-    ok, err = activate_instance(name, new_port, sub, new_proto, revoke_on_fail=False, cleanup_on_fail=False)
+    ok, err = activate_instance(name, new_port, sub, new_proto, revoke_on_fail=False, cleanup_on_fail=False, max_clients=mc)
     if not ok:
         drop_rules(sub, new_port, new_proto)
         run(["ufw", "delete", "allow", f"{new_port}/{new_proto}"])
-        activate_instance(name, old_port, old_sub, old_proto, revoke_on_fail=False, cleanup_on_fail=False)
+        activate_instance(name, old_port, old_sub, old_proto, revoke_on_fail=False, cleanup_on_fail=False, max_clients=old_mc)
         return False, err
-    u["id"], u["port"], u["subnet"], u["proto"] = new_id, new_port, sub, new_proto
+    u["id"], u["port"], u["subnet"], u["proto"], u["max_clients"] = new_id, new_port, sub, new_proto, mc
     with SLOCK:
         if name in USAGE:
             USAGE[name]["lu"] = USAGE[name]["ld"] = 0
             USAGE[name]["sk"] = None
+            USAGE[name].pop("sessions", None)
         CONN.pop(name, None)
     return True, ""
 
@@ -875,6 +991,8 @@ def sync_existing():
         idx = a - 100 if (b == 0 and a > 100 and a - 100 not in ids) else free_id(st)
         pm = re.search(r"^proto (\w+)", txt, re.M)
         proto = "tcp" if pm and pm.group(1).startswith("tcp") else "udp"
+        mcm = re.search(r"^max-clients[ \t]+(\d+)", txt, re.M)
+        mc = max(1, min(50, int(mcm.group(1)))) if mcm else 1
         dst = f"{OVPN_DIR}/{name}.ovpn"
         if not os.path.exists(dst):
             try:
@@ -886,7 +1004,8 @@ def sync_existing():
             except Exception:
                 pass
         st["users"].append({"name": name, "id": idx, "port": port, "subnet": sub,
-                            "created": time.time(), "expires": None, "proto": proto, "speed": None})
+                            "created": time.time(), "expires": None, "proto": proto, "speed": None,
+                            "max_clients": mc})
         known.add(name)
         changed = True
     if changed:
@@ -1132,6 +1251,11 @@ def restore_rules():
             apply_rules(u["subnet"], u["port"], u.get("proto", "udp"))
         except Exception:
             pass
+    if "ROUTING" in globals() and globals()["ROUTING"] is not None:
+        try:
+            globals()["ROUTING"].sync_abuse_rules()
+        except Exception:
+            pass
 
 
 def find_dev(sub):
@@ -1360,11 +1484,47 @@ def mgmt_clients(name):
         if line.startswith("CLIENT_LIST,"):
             p = line.split(",")
             try:
-                rows.append({"ip": p[3], "rx": int(p[5]), "tx": int(p[6]), "since": int(p[8]),
+                rows.append({"real_ip": p[2], "ip": p[3], "rx": int(p[5]), "tx": int(p[6]), "since": int(p[8]),
                              "cid": p[10] if len(p) > 10 else "0"})
             except (IndexError, ValueError):
                 continue
     return rows
+
+
+def mgmt_kill_client(name, cid=None):
+    path = mgmt_path(name)
+    if not os.path.exists(path):
+        return False, 0
+    if cid is not None:
+        try:
+            cids = [str(int(cid))]
+        except (TypeError, ValueError):
+            return False, 0
+    else:
+        rows = mgmt_clients(name) or []
+        cids = [str(r["cid"]) for r in rows if r.get("cid") is not None]
+    sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    kicked = 0
+    try:
+        sk.settimeout(2.0)
+        sk.connect(path)
+        for c_id in cids:
+            try:
+                sk.sendall(f"client-kill {int(c_id)}\n".encode("ascii"))
+                kicked += 1
+            except (OSError, ValueError):
+                pass
+        if not cids and cid is None:
+            sk.sendall(f"kill {name}\n".encode("utf-8"))
+        try:
+            sk.sendall(b"quit\n")
+        except OSError:
+            pass
+    except OSError:
+        return False, 0
+    finally:
+        sk.close()
+    return kicked > 0, kicked
 
 
 def _add_usage(rec, du, dd, today):
@@ -1381,20 +1541,75 @@ def account_mgmt(u, rows, dt, now, today):
     rec = USAGE.get(name)
     if rec is None:
         rec = USAGE[name] = {"up": 0, "down": 0, "lu": 0, "ld": 0, "d": today, "du": 0, "dd": 0, "mt": now}
+    sessions = rec.get("sessions")
+    if not isinstance(sessions, dict):
+        sessions = {}
+        if rec.get("sk"):
+            sessions[rec["sk"]] = {"rx": int(rec.get("sr", 0) or 0), "tx": int(rec.get("st", 0) or 0)}
+
     c = CONN.setdefault(name, {})
+    srx = c.get("_srx")
+    if not isinstance(srx, dict):
+        srx = {}
+        if c.get("key"):
+            srx[c["key"]] = (c.get("rx", 0), c.get("rx_t", now))
+
     du = dd = 0
-    r = rows[0] if rows else None
-    if r:
+    new_sessions = {}
+    new_srx = {}
+    active_rows = []
+    sess_out = []
+    prev_mt = rec.get("mt", now)
+
+    for r in rows or []:
         key = f"{r['cid']}:{r['since']}"
-        if rec.get("sk") == key and r["rx"] >= rec.get("sr", 0) and r["tx"] >= rec.get("st", 0):
-            du, dd = r["rx"] - rec["sr"], r["tx"] - rec["st"]
-        elif rec.get("sk") != key and r["since"] >= rec.get("mt", now) - 5:
-            du, dd = r["rx"], r["tx"]
-        rec["sk"], rec["sr"], rec["st"] = key, r["rx"], r["tx"]
-        if c.get("key") != key or c.get("rx") != r["rx"]:
-            c["key"], c["rx"], c["rx_t"] = key, r["rx"], now
-        online = now - c.get("rx_t", now) < ACTIVE_WINDOW
-        c.update(online=online, ip=r["ip"] or c.get("ip"), since=r["since"])
+        prev = sessions.get(key)
+        if prev and r["rx"] >= prev.get("rx", 0) and r["tx"] >= prev.get("tx", 0):
+            du += r["rx"] - prev["rx"]
+            dd += r["tx"] - prev["tx"]
+        elif prev is None and r["since"] >= prev_mt - 5:
+            du += r["rx"]
+            dd += r["tx"]
+        new_sessions[key] = {"rx": r["rx"], "tx": r["tx"]}
+
+        old_r = srx.get(key)
+        if old_r is None or old_r[0] != r["rx"]:
+            rx_t = now
+        else:
+            rx_t = old_r[1]
+        new_srx[key] = (r["rx"], rx_t)
+        is_row_active = (now - rx_t) < ACTIVE_WINDOW
+        if is_row_active:
+            active_rows.append(r)
+        sess_out.append({
+            "cid": r["cid"],
+            "ip": r["ip"],
+            "real_ip": r.get("real_ip", ""),
+            "since": r["since"],
+            "rx": r["rx"],
+            "tx": r["tx"],
+            "active": is_row_active,
+        })
+
+    rec["sessions"] = new_sessions
+    c["_srx"] = new_srx
+    c["sessions"] = sess_out
+
+    if rows:
+        first = rows[0]
+        first_key = f"{first['cid']}:{first['since']}"
+        rec["sk"], rec["sr"], rec["st"] = first_key, first["rx"], first["tx"]
+        c["key"], c["rx"], c["rx_t"] = first_key, first["rx"], new_srx[first_key][1]
+        online = bool(active_rows)
+        ips = [r["ip"] for r in rows if r.get("ip")]
+        earliest_since = min((r["since"] for r in rows if r.get("since")), default=first.get("since"))
+        c.update(
+            online=online,
+            online_count=len(active_rows) if active_rows else (len(rows) if online else 0),
+            ip=ips[0] if ips else c.get("ip"),
+            ips=ips,
+            since=earliest_since,
+        )
         if online:
             c["last"] = now
     else:
@@ -1402,13 +1617,16 @@ def account_mgmt(u, rows, dt, now, today):
         c.pop("key", None)
         c.pop("rx", None)
         c["online"] = False
+        c["online_count"] = 0
+        c["ips"] = []
+        c["sessions"] = []
         if not c.get("ip"):
             ip = lease_ip(name)
             if ip:
                 c["ip"] = ip
     rec["mt"] = now
     _add_usage(rec, du, dd, today)
-    RATES[name] = (du / dt, dd / dt) if r else (0.0, 0.0)
+    RATES[name] = (du / dt, dd / dt) if rows else (0.0, 0.0)
 
 
 def account_legacy(u, counters, dt, now, today):
@@ -1416,9 +1634,15 @@ def account_legacy(u, counters, dt, now, today):
     rows = parse_status(name)
     c = CONN.setdefault(name, {})
     if rows:
-        c.update(online=True, last=now, ip=rows[0]["ip"] or c.get("ip"), since=rows[0]["since"] or c.get("since"))
+        ips = [r["ip"] for r in rows if r.get("ip")]
+        c.update(online=True, online_count=len(rows), last=now,
+                 ip=ips[0] if ips else c.get("ip"), ips=ips,
+                 sessions=[], since=rows[0]["since"] or c.get("since"))
     else:
         c["online"] = False
+        c["online_count"] = 0
+        c["ips"] = []
+        c["sessions"] = []
         if not c.get("ip"):
             ip = lease_ip(name)
             if ip:
@@ -1526,7 +1750,7 @@ def reset_usage(u):
     with SLOCK:
         old = USAGE.get(u["name"], {})
         USAGE[u["name"]] = {"up": 0, "down": 0, "lu": cu, "ld": cd, "d": time.strftime("%Y-%m-%d"), "du": 0, "dd": 0,
-                            **{k: old[k] for k in ("sk", "sr", "st", "mt") if k in old}}
+                            **{k: old[k] for k in ("sk", "sr", "st", "mt", "sessions") if k in old}}
 
 
 def parse_status(name):
@@ -1708,11 +1932,24 @@ _prebuild()
 
 
 def user_route(u):
+    rt = globals().get("ROUTING")
+    if rt and rt.smart_enabled() and (rt.smart.get("all_users") or u.get("sr")):
+        if rt.smart.get("mode") == "domains_only" and rt.smart_select_pool(EXLIST, PLIST):
+            return "smart"
+        if not (EX["enabled"] and EXLIST and (EX.get("all_users") or u.get("ex"))) and rt.smart_select_pool(EXLIST, PLIST):
+            return "smart"
     if EX["enabled"] and EXLIST and (EX.get("all_users") or u.get("ex")):
         return "exit"
     if PCFG["enabled"] and PLIST and (PCFG.get("all_users") or u.get("px")):
         return "proxy"
     return None
+
+
+def smart_feature_state():
+    rt = globals().get("ROUTING")
+    if not rt or not rt.smart_enabled():
+        return "off"
+    return "all" if rt.smart.get("all_users") else "ok"
 
 
 def feature_state():
@@ -1731,8 +1968,14 @@ def _recvn(s, n):
     return buf
 
 
-def proxy_handshake(s, p, dip, dport):
+def proxy_handshake(s, p, dip, dport, host=None):
     ip4 = socket.inet_aton(dip)
+    target_host = None
+    if host and len(host.encode("ascii", "ignore")) <= 255:
+        try:
+            target_host = host.encode("ascii")
+        except Exception:
+            target_host = None
     if p["type"] == "socks5":
         s.sendall(b"\x05\x02\x00\x02" if p["user"] else b"\x05\x01\x00")
         r = _recvn(s, 2)
@@ -1745,7 +1988,10 @@ def proxy_handshake(s, p, dip, dport):
                 raise OSError("socks5 auth failed")
         elif r[1] != 0:
             raise OSError("socks5 method rejected")
-        s.sendall(b"\x05\x01\x00\x01" + ip4 + struct.pack("!H", dport))
+        if target_host:
+            s.sendall(b"\x05\x01\x00\x03" + bytes([len(target_host)]) + target_host + struct.pack("!H", dport))
+        else:
+            s.sendall(b"\x05\x01\x00\x01" + ip4 + struct.pack("!H", dport))
         h = _recvn(s, 4)
         if h[1] != 0:
             raise _Refused("socks5 refused")
@@ -1758,7 +2004,8 @@ def proxy_handshake(s, p, dip, dport):
         if _recvn(s, 8)[1] != 0x5A:
             raise _Refused("socks4 refused")
     else:
-        req = f"CONNECT {dip}:{dport} HTTP/1.1\r\nHost: {dip}:{dport}\r\n"
+        dst = (target_host.decode("ascii") if target_host else dip)
+        req = f"CONNECT {dst}:{dport} HTTP/1.1\r\nHost: {dst}:{dport}\r\n"
         if p["user"]:
             req += "Proxy-Authorization: Basic " + base64.b64encode(f"{p['user']}:{p['pw']}".encode()).decode() + "\r\n"
         s.sendall((req + "\r\n").encode())
@@ -1772,11 +2019,11 @@ def proxy_handshake(s, p, dip, dport):
             raise _Refused("http connect refused")
 
 
-def proxy_connect(p, dip, dport):
+def proxy_connect(p, dip, dport, host=None):
     s = socket.create_connection((p["host"], p["port"]), timeout=5)
     try:
         s.settimeout(7)
-        proxy_handshake(s, p, dip, dport)
+        proxy_handshake(s, p, dip, dport, host=host)
         s.settimeout(None)
         return s
     except Exception:
@@ -1860,7 +2107,31 @@ class _RedirHandler(socketserver.BaseRequestHandler):
         except OSError:
             return
         mode = PROUTE.get(sub)
-        pool, cfg = (EXLIST, EX) if mode == "exit" else ((PLIST, PCFG) if mode == "proxy" else ([], {}))
+        initial = b""
+        sni_host = None
+        if mode == "smart":
+            rt = globals().get("ROUTING")
+            try:
+                c.settimeout(1.5)
+                initial = c.recv(4096)
+            except OSError:
+                initial = b""
+            finally:
+                try:
+                    c.settimeout(None)
+                except OSError:
+                    pass
+            sni_host = extract_sni_or_host(initial)
+            if rt and rt.smart_should_proxy(sni_host):
+                pool = rt.smart_select_pool(EXLIST, PLIST)
+                cfg = {"mode": EX.get("mode", "sticky") if EXLIST else "round",
+                       "rotate_min": EX.get("rotate_min", 0) if EXLIST else 0,
+                       "fallback": bool(rt.smart.get("fallback_direct", True))}
+            else:
+                pool, cfg = [], {"fallback": True}
+        else:
+            pool, cfg = (EXLIST, EX) if mode == "exit" else ((PLIST, PCFG) if mode == "proxy" else ([], {}))
+
         up = None
         if mode and pool:
             tried = set()
@@ -1870,20 +2141,26 @@ class _RedirHandler(socketserver.BaseRequestHandler):
                     break
                 tried.add(p["key"])
                 try:
-                    up = proxy_connect(p, dip, dport)
+                    up = proxy_connect(p, dip, dport, host=sni_host)
                     proxy_mark(p["key"], True)
                     break
                 except _Refused:
                     continue
                 except OSError:
                     proxy_mark(p["key"], False)
-        if up is None and (not mode or not pool or cfg["fallback"]):
+        if up is None and (not mode or not pool or cfg.get("fallback")):
             try:
                 up = socket.create_connection((dip, dport), timeout=8)
             except OSError:
                 return
         if up is None:
             return
+        if initial:
+            try:
+                up.sendall(initial)
+            except OSError:
+                up.close()
+                return
         _relay(c, up)
 
 
@@ -2024,13 +2301,33 @@ def proxy_sync_rules():
     subs = sorted(route)
     PSUBS = set(subs)
     lp = str(PROXY_LPORT)
-    nat = [["-s", f"{s}.0/24", "!", "-d", f"{s}.0/24", "-p", "tcp", "-m", "addrtype", "!", "--dst-type", "LOCAL",
-            "-j", "REDIRECT", "--to-ports", lp] for s in subs]
+    nat = []
+    rt = globals().get("ROUTING")
+    smart_ports = sorted({int(p) for p in ((rt.smart.get("ports") if rt else None) or DEFAULT_SMART_PORTS) if 1 <= int(p) <= 65535})[:15]
+    smart_dom_only = bool(rt and rt.smart.get("mode") == "domains_only" and smart_ports)
+    for s in subs:
+        if route[s] == "smart" and smart_dom_only:
+            nat.append(["-s", f"{s}.0/24", "!", "-d", f"{s}.0/24", "-p", "tcp",
+                        "-m", "multiport", "--dports", ",".join(str(p) for p in smart_ports),
+                        "-m", "addrtype", "!", "--dst-type", "LOCAL", "-j", "REDIRECT", "--to-ports", lp])
+        else:
+            nat.append(["-s", f"{s}.0/24", "!", "-d", f"{s}.0/24", "-p", "tcp",
+                        "-m", "addrtype", "!", "--dst-type", "LOCAL", "-j", "REDIRECT", "--to-ports", lp])
     inp = [["-s", f"{s}.0/24", "-p", "tcp", "--dport", lp, "-j", "ACCEPT"] for s in subs]
-    fw = [["-s", f"{s}.0/24", "-p", "udp", "--dport", "443", "-j", "REJECT"] for s in subs
-          if (EX if route[s] == "exit" else PCFG)["block_quic"]]
+    fw = []
+    for s in subs:
+        if route[s] == "smart":
+            if rt and rt.smart.get("block_quic", True):
+                fw.append(["-s", f"{s}.0/24", "-p", "udp", "--dport", "443", "-j", "REJECT"])
+        elif (EX if route[s] == "exit" else PCFG)["block_quic"]:
+            fw.append(["-s", f"{s}.0/24", "-p", "udp", "--dport", "443", "-j", "REJECT"])
     for (t, c, par), rules in zip(PCHAINS, (nat, inp, fw)):
         _chain_apply(t, c, par, rules)
+    if rt:
+        try:
+            rt.sync_abuse_rules()
+        except Exception:
+            pass
 
 
 def proxy_loop():
@@ -2255,6 +2552,9 @@ def ovpn_bytes(path, u=None):
     a = user_ovpn_addr(u)
     if a:
         data = re.sub(r"^remote (\S+) (\d+)", lambda m: f"remote {a} {m.group(2)}", data, count=1, flags=re.M)
+    rt = globals().get("ROUTING")
+    if rt:
+        data = rt.apply_failover(data, u)
     return data.encode("utf-8")
 
 
@@ -2333,6 +2633,18 @@ def restart_for_dns():
         if is_active(n):
             run(["systemctl", "restart", f"openvpn-server@{n}"])
             time.sleep(1.5)
+
+
+ROUTING = RoutingManager(
+    base_dir=BASE,
+    server_dir=SERVER_DIR,
+    run_fn=run,
+    load_state_fn=load_state,
+    set_dns_fn=set_dns,
+    read_dns_fn=read_dns,
+    restart_for_dns_fn=restart_for_dns,
+    proxy_sync_fn=proxy_sync_rules,
+)
 
 
 def read_uptime():
@@ -2484,7 +2796,13 @@ def index():
         u["active"] = is_active(u["name"])
         stats["active"] += u["active"]
         rec = USAGE.get(u["name"], {})
+        cn = CONN.get(u["name"], {})
         u["up"], u["down"] = rec.get("up", 0), rec.get("down", 0)
+        u["max_clients"] = max(1, min(50, int(u.get("max_clients") or 1)))
+        u["online"] = bool(cn.get("online"))
+        u["online_count"] = int(cn.get("online_count") or (1 if u["online"] else 0))
+        u["ips"] = list(cn.get("ips") or ([cn["ip"]] if cn.get("ip") else []))
+        u["sessions"] = list(cn.get("sessions") or [])
         exp = u.get("expires")
         if exp:
             left = exp - now
@@ -2499,6 +2817,7 @@ def index():
     host = re.sub(r":\d+$", "", request.host)
     px_state, ex_state = feature_state()
     return page(DASH_HTML, active="users", users=users, nid=free_id(st), px_state=px_state, ex_state=ex_state,
+                sr_state=smart_feature_state(),
                 portal_base=PORTAL_BASE_URL or f"http://{host}:{PORTAL_PORT}",
                 port=next_port(st), stats=stats, ready=host_ready(), adopt=adoptable_clients(st))
 
@@ -2623,8 +2942,8 @@ def dashboard():
         st = load_state()
     up = read_uptime()
     return page(DASHBOARD_HTML, active="dash", total=len(st["users"]), nid=free_id(st), port=next_port(st),
-                ready=host_ready(), ip=exit_ip(False), dns=read_dns(), osn=os_name(), up=up, up_txt=fmt_uptime(up),
-                online=online_count(), lat=LAT["v"])
+                ready=host_ready(), ip=exit_ip(False), dns=read_dns(), dns_presets=DNS_PRESETS,
+                osn=os_name(), up=up, up_txt=fmt_uptime(up), online=online_count(), lat=LAT["v"])
 
 
 @app.route("/api/dash")
@@ -2657,7 +2976,11 @@ def dash_restart():
 @app.route("/dashboard/dns", methods=["POST"])
 @login_required
 def dash_dns():
-    servers = parse_dns(request.form.get("dns", ""))
+    preset = (request.form.get("preset") or "").strip().lower()
+    if preset in DNS_PRESETS:
+        servers = list(DNS_PRESETS[preset]["servers"])
+    else:
+        servers = parse_dns(request.form.get("dns", ""))
     if not host_ready():
         flash(tr("f_nohost"), "err")
     elif not servers:
@@ -2744,6 +3067,7 @@ def create():
         speed = round(float(request.form.get("speed") or 0), 2)
         daily = round(float(request.form.get("daily") or 0), 3)
         total = round(float(request.form.get("total") or 0), 3)
+        mc = int(request.form.get("max_clients") or 1)
         mport = int(request.form.get("port", "")) if manual else None
     except ValueError:
         flash(tr("f_num"), "err")
@@ -2759,6 +3083,8 @@ def create():
             err = tr("f_name")
         elif proto not in ("udp", "tcp"):
             err = tr("f_proto")
+        elif not 1 <= mc <= 50:
+            err = tr("f_mc")
         elif not 0 <= days <= 3650:
             err = tr("f_days")
         elif not 0 <= speed <= 10000:
@@ -2777,14 +3103,14 @@ def create():
 
         idx = free_id(st)
         sub = new_subnet(idx, st)
-        ok, cerr = create_instance(name, port, sub, proto)
+        ok, cerr = create_instance(name, port, sub, proto, max_clients=mc)
         if not ok:
             flash(tr("f_build", err=cerr), "err")
             return redirect(url_for("index"))
         now = time.time()
         user = {"name": name, "id": idx, "port": port, "subnet": sub, "created": now,
                 "expires": now + days * 86400 if days else None, "proto": proto,
-                "speed": speed or None, "limit_daily": daily or None,
+                "max_clients": mc, "speed": speed or None, "limit_daily": daily or None,
                 "limit_total": total or None, "blocked": None}
         st["users"].append(user)
         st["users"].sort(key=lambda u: u["id"])
@@ -2863,8 +3189,20 @@ def edit_user(name):
     f = request.form
     proto = f.get("proto", "udp")
     oa = (f.get("ovpn_addr") or "").strip()
+    raw_dns = (f.get("dns") or "").strip()
+    user_dns = [] if not raw_dns else parse_dns(raw_dns)
+    raw_remotes = [ln.strip() for ln in (f.get("backup_remotes") or "").splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    user_remotes = []
+    for line in raw_remotes:
+        parsed_r = parse_backup_remote(line)
+        if not parsed_r:
+            user_remotes = None
+            break
+        if parsed_r["raw"] not in user_remotes:
+            user_remotes.append(parsed_r["raw"])
     try:
         new_id, new_port = int(f.get("id", "")), int(f.get("port", ""))
+        mc = int(f.get("max_clients") or 1)
         speed = round(float(f.get("speed") or 0), 2)
         daily = round(float(f.get("daily") or 0), 3)
         total = round(float(f.get("total") or 0), 3)
@@ -2879,9 +3217,12 @@ def edit_user(name):
             return redirect(url_for("index"))
         others = {"users": [x for x in st["users"] if x["name"] != name]}
         old_proto = u.get("proto", "udp")
+        old_mc = max(1, min(50, int(u.get("max_clients") or 1)))
         err = None
         if proto not in ("udp", "tcp"):
             err = tr("f_proto")
+        elif not 1 <= mc <= 50:
+            err = tr("f_mc")
         elif new_id < 1 or any(x["id"] == new_id for x in others["users"]):
             err = tr("f_edit_id")
         elif not 0 <= speed <= 10000:
@@ -2890,31 +3231,53 @@ def edit_user(name):
             err = tr("f_edit_lim")
         elif oa and not ovpn_addr_valid(oa):
             err = tr("f_oa_bad")
+        elif raw_dns and user_dns is None:
+            err = tr("f_dns_bad")
+        elif user_remotes is None:
+            err = tr("f_oa_bad")
         elif (new_port, proto) != (u["port"], old_proto):
             err = port_error(others, new_port, proto)
         if err:
             flash(err, "err")
             return redirect(url_for("index"))
-        if (new_id, new_port, proto) != (u["id"], u["port"], old_proto):
-            ok, e = edit_instance(u, new_id, new_port, proto)
+        if (new_id, new_port, proto, mc) != (u["id"], u["port"], old_proto, old_mc):
+            ok, e = edit_instance(u, new_id, new_port, proto, mc)
             if not ok:
                 flash(tr("f_edit_fail", err=e), "err")
                 return redirect(url_for("index"))
             if u.get("blocked"):
                 run(["systemctl", "disable", "--now", f"openvpn-server@{name}"])
+        u["max_clients"] = mc
         u["speed"], u["limit_daily"], u["limit_total"] = speed or None, daily or None, total or None
         u["ovpn_addr"] = oa or None
+        u["dns"] = user_dns if user_dns else None
+        u["backup_remotes"] = user_remotes if user_remotes else None
         px_st, ex_st = feature_state()
         if px_st == "ok":
             u["px"] = f.get("px") == "1"
         if ex_st == "ok":
             u["ex"] = f.get("ex") == "1"
+        if smart_feature_state() == "ok":
+            u["sr"] = f.get("sr") == "1"
+        ROUTING.sync_user_ccd(name, user_dns or [])
         st["users"].sort(key=lambda x: x["id"])
         save_state(st)
         apply_speed(u)
     enforce_blocks()
     proxy_sync_rules()
     flash(tr("f_edit_ok", name=name), "ok")
+    return redirect(url_for("index"))
+
+
+@app.route("/kick/<name>", methods=["POST"])
+@login_required
+def kick_user(name):
+    cid = request.form.get("cid")
+    ok, count = mgmt_kill_client(name, cid if cid else None)
+    if ok:
+        flash(tr("f_kicked", n=count, name=name), "ok")
+    else:
+        flash(tr("f_kick_fail"), "err")
     return redirect(url_for("index"))
 
 
@@ -2932,7 +3295,7 @@ def reset_user_usage(name):
     return redirect(url_for("index"))
 
 
-ADV_SUBPAGES = {"account": "adv_pg_account", "proxy": "adv_pg_proxy", "exit": "adv_pg_exit"}
+ADV_SUBPAGES = {"account": "adv_pg_account", "proxy": "adv_pg_proxy", "exit": "adv_pg_exit", "routing": "adv_pg_routing"}
 
 
 @app.route("/advanced")
@@ -2961,6 +3324,123 @@ def adv_pg_proxy():
 def adv_pg_exit():
     session["adv_last"] = "exit"
     return page(ADV_EX_HTML, active="adv_ex", ex=exit_form(), oa={"addr": ovpn_addr()})
+
+
+@app.route("/advanced/routing")
+@login_required
+def adv_pg_routing():
+    session["adv_last"] = "routing"
+    return page(
+        ADV_RT_HTML,
+        active="adv_rt",
+        rt_dns=ROUTING.get_dns_state(),
+        rt_bp=ROUTING.get_bypass(),
+        rt_sm=ROUTING.get_smart(),
+        rt_ab=ROUTING.get_abuse(),
+        rt_rm=ROUTING.get_remotes(),
+        dns_presets=DNS_PRESETS,
+        bp_presets=BYPASS_PRESETS,
+        sm_presets=SMART_PRESETS,
+    )
+
+
+@app.route("/advanced/routing/dns", methods=["POST"])
+@login_required
+def adv_rt_dns():
+    f = request.form
+    preset = (f.get("preset") or "").strip().lower()
+    raw_dns = (f.get("dns") or "").strip()
+    target = preset if (preset in DNS_PRESETS and not raw_dns) else (raw_dns or preset)
+    if not host_ready():
+        flash(tr("f_nohost"), "err")
+        return redirect(url_for("adv_pg_routing"))
+    with LOCK:
+        ok, msg, _servers = ROUTING.apply_dns(target)
+    if not ok:
+        flash(tr("f_dns_fail", err=msg), "err")
+    elif msg == "unchanged":
+        flash(tr("f_dns_same"), "ok")
+    else:
+        flash(tr("f_dns_saved"), "ok")
+    return redirect(url_for("adv_pg_routing"))
+
+
+@app.route("/advanced/routing/bypass", methods=["POST"])
+@login_required
+def adv_rt_bypass():
+    f = request.form
+    res = ROUTING.save_bypass({
+        "enabled": f.get("enabled") == "1",
+        "presets": f.getlist("presets"),
+        "custom_cidrs": f.get("custom_cidrs", ""),
+        "custom_domains": f.get("custom_domains", ""),
+        "max_routes": f.get("max_routes") or 250,
+        "resolve_hours": f.get("resolve_hours") or 6,
+    }, resolve_now=(f.get("enabled") == "1"))
+    flash(tr("f_rt_saved") + f" ({res['route_count']} routes)", "ok")
+    return redirect(url_for("adv_pg_routing"))
+
+
+@app.route("/advanced/routing/bypass/resolve", methods=["POST"])
+@login_required
+def adv_rt_bypass_resolve():
+    info = ROUTING.resolve_bypass_domains(sync_ccd=True)
+    flash(tr("f_rt_resolved", ok=info["domains_resolved"], tot=info["domains_total"],
+             routes=info["summary"]["pushed_count"]), "ok")
+    return redirect(url_for("adv_pg_routing"))
+
+
+@app.route("/advanced/routing/smart", methods=["POST"])
+@login_required
+def adv_rt_smart():
+    f = request.form
+    ROUTING.save_smart({
+        "enabled": f.get("enabled") == "1",
+        "mode": f.get("mode", "domains_only"),
+        "target": f.get("target", "auto"),
+        "warp_host": f.get("warp_host", "127.0.0.1"),
+        "warp_port": f.get("warp_port") or 40000,
+        "presets": f.getlist("presets"),
+        "domains": f.get("domains", ""),
+        "ports": f.get("ports", "80, 443, 8080, 8443"),
+        "all_users": f.get("all_users") == "1",
+        "block_quic": f.get("block_quic") == "1",
+        "fallback_direct": f.get("fallback_direct") == "1",
+    })
+    flash(tr("f_rt_saved"), "ok")
+    return redirect(url_for("adv_pg_routing"))
+
+
+@app.route("/advanced/routing/abuse", methods=["POST"])
+@login_required
+def adv_rt_abuse():
+    f = request.form
+    res = ROUTING.save_abuse({
+        "enabled": f.get("enabled") == "1",
+        "block_smtp": f.get("block_smtp") == "1",
+        "block_smtp_alt": f.get("block_smtp_alt") == "1",
+        "block_torrent": f.get("block_torrent") == "1",
+        "block_torrent_dpi": f.get("block_torrent_dpi") == "1",
+        "custom_blocked_ports": f.get("custom_blocked_ports", ""),
+    })
+    flash(tr("f_ab_saved", rules=res.get("rules", 0)), "ok")
+    return redirect(url_for("adv_pg_routing"))
+
+
+@app.route("/advanced/routing/remotes", methods=["POST"])
+@login_required
+def adv_rt_remotes():
+    f = request.form
+    ROUTING.save_remotes({
+        "enabled": f.get("enabled") == "1",
+        "remotes": f.get("remotes", ""),
+        "remote_random": f.get("remote_random") == "1",
+        "connect_retry_min": f.get("connect_retry_min") or 2,
+        "connect_retry_max": f.get("connect_retry_max") or 5,
+        "connect_timeout": f.get("connect_timeout") or 10,
+    })
+    flash(tr("f_rt_saved"), "ok")
+    return redirect(url_for("adv_pg_routing"))
 
 
 @app.route("/advanced/account", methods=["POST"])
@@ -3451,11 +3931,15 @@ def api_usage():
             du, dd = daily_bytes(rec)
             out.append({"name": u["name"], "id": u["id"], "port": u["port"], "proto": u.get("proto", "udp"),
                         "created": u["created"], "expires": u.get("expires"),
+                        "max_clients": max(1, min(50, int(u.get("max_clients") or 1))),
                         "up": rec.get("up", 0), "down": rec.get("down", 0),
                         "day_up": du, "day_down": dd,
                         "limit_daily": u.get("limit_daily"), "limit_total": u.get("limit_total"),
                         "blocked": u.get("blocked"),
-                        "ip": cn.get("ip"), "online": bool(cn.get("online")),
+                        "ip": cn.get("ip"), "ips": cn.get("ips") or [],
+                        "online": bool(cn.get("online")),
+                        "online_count": int(cn.get("online_count") or (1 if cn.get("online") else 0)),
+                        "sessions": cn.get("sessions") or [],
                         "last": cn.get("last"), "since": cn.get("since"),
                         "rate_up": ru, "rate_down": rd})
     return jsonify(users=out, now=time.time())
@@ -3583,7 +4067,7 @@ background:var(--inp);color:var(--mut);border:1px solid var(--bd)}
 background:linear-gradient(135deg,var(--p1),var(--p2));color:#fff;flex:none}
 .form{display:grid;grid-template-columns:repeat(12,1fr);gap:10px;align-items:start}
 .f-id{grid-column:span 2}.f-name{grid-column:span 4}.f-proto{grid-column:span 2}.f-port{grid-column:span 4}
-.f-q{grid-column:span 3}.f-btn{grid-column:1/-1}.f-btn .btn{width:100%;padding:12px}
+.f-q{grid-column:span 3}.f-mc{grid-column:span 2}.f-q2{grid-column:span 2}.f-btn{grid-column:1/-1}.f-btn .btn{width:100%;padding:12px}
 .chip{padding:11px 16px;border-radius:12px;background:var(--inp);border:1px dashed var(--bd);font-weight:700;text-align:center;color:var(--p1)}
 .pwrap{display:flex;gap:6px}.pwrap input{flex:1;min-width:0}
 #pmsg{display:block;font-size:12px;margin-top:4px;min-height:18px}
@@ -3787,13 +4271,14 @@ TOP = """<!doctype html><html lang="{{ lang }}" dir="{{ dirn }}"><head><meta cha
 <a href="{{ url_for('network') }}" class="{{ 'on' if active=='net' }}">{{ ic('wifi') }}<span>{{ t('nav_net') }}</span></a>
 <a href="{{ url_for('usage') }}" class="{{ 'on' if active=='usage' }}">{{ ic('bars') }}<span>{{ t('nav_usage') }}</span></a>
 <a href="{{ url_for('backup_page') }}" class="{{ 'on' if active=='backup' }}">{{ ic('drive') }}<span>{{ t('nav_backup') }}</span></a>
-{% set advon = active in ('adv_acc','adv_px','adv_ex') %}
+{% set advon = active in ('adv_acc','adv_px','adv_ex','adv_rt') %}
 <div class="grp {{ 'open' if advon }}" id="advgrp">
 <button type="button" class="gbtn {{ 'on' if advon }}" id="advbtn" aria-expanded="{{ 'true' if advon else 'false' }}" aria-controls="advsub">{{ ic('sliders') }}<span>{{ t('nav_adv') }}</span>{{ ic('chevron',16,'chev') }}</button>
 <div class="smenu" id="advsub"><div>
 <a href="{{ url_for('adv_pg_account') }}" class="{{ 'on' if active=='adv_acc' }}">{{ ic('key',16) }}<span>{{ t('nav_adv_acc') }}</span></a>
 <a href="{{ url_for('adv_pg_proxy') }}" class="{{ 'on' if active=='adv_px' }}">{{ ic('globe',16) }}<span>{{ t('nav_adv_px') }}</span></a>
 <a href="{{ url_for('adv_pg_exit') }}" class="{{ 'on' if active=='adv_ex' }}">{{ ic('server',16) }}<span>{{ t('nav_adv_ex') }}</span></a>
+<a href="{{ url_for('adv_pg_routing') }}" class="{{ 'on' if active=='adv_rt' }}">{{ ic('sliders',16) }}<span>{{ t('nav_adv_rt') }}</span></a>
 </div></div></div>
 </nav>
 <div class="side-foot">
@@ -3838,8 +4323,9 @@ DASH_HTML = """
 <div class="pwrap"><input id="port" name="port" type="number" inputmode="numeric" min="1" max="65535" value="{{ port }}" readonly>
 <button type="button" class="btn ghost sm" id="pbtn">{{ ic('edit',15) }} <span>{{ t('c_manual') }}</span></button></div>
 <span id="pmsg"></span></div>
-<div class="f-q"><label>{{ t('c_days') }}</label><input name="days" type="number" inputmode="numeric" min="0" max="3650" value="30"></div>
-<div class="f-q"><label>{{ t('c_speed') }}</label><input name="speed" type="number" inputmode="decimal" min="0" max="10000" step="any" value="0"></div>
+<div class="f-q2"><label>{{ t('c_days') }}</label><input name="days" type="number" inputmode="numeric" min="0" max="3650" value="30"></div>
+<div class="f-mc"><label>{{ t('c_mc') }}</label><input name="max_clients" type="number" inputmode="numeric" min="1" max="50" value="1"></div>
+<div class="f-q2"><label>{{ t('c_speed') }}</label><input name="speed" type="number" inputmode="decimal" min="0" max="10000" step="any" value="0"></div>
 <div class="f-q"><label>{{ t('c_daily') }}</label><input name="daily" type="number" inputmode="decimal" min="0" max="1000000" step="any" value="0"></div>
 <div class="f-q"><label>{{ t('c_total') }}</label><input name="total" type="number" inputmode="decimal" min="0" max="1000000" step="any" value="0"></div>
 <div class="f-btn"><button class="btn">{{ ic('plus',16) }} {{ t('c_btn') }}</button></div>
@@ -3862,6 +4348,7 @@ DASH_HTML = """
 <div class="grow"><b><span class="dot {{ 'on' if u.active else 'off' }}"></span>{{ u.name }}</b>
 <div class="tags"><span class="tag">ID #{{ u.id }}</span><span class="tag">{{ t('port') }} {{ u.port }}</span>
 <span class="tag">{{ u.proto|upper }}</span>
+<span class="tag">{{ ic('users',11) }} {{ u.online_count }}/{{ u.max_clients }} {{ t('devices') }}</span>
 <span class="tag">{{ t('on') if u.active else t('off') }}</span>
 <span class="tag">{{ ic('zap',11) }} {% if u.speed %}{{ '%g'|format(u.speed) }} Mbps{% else %}{{ t('nospeed') }}{% endif %}</span>
 {% if u.limit_daily %}<span class="tag">{{ ic('calendar',11) }} {{ t('lim_daily') }} {{ '%g'|format(u.limit_daily) }} GB</span>{% endif %}
@@ -3886,8 +4373,10 @@ onsubmit='return confirm({{ t("confirm_regen_link", name=u.name)|tojson }})'><bu
 <div class="acts">
 <a class="btn sm" href="{{ url_for('download', name=u.name) }}">{{ ic('download',15) }} {{ t('dl_ovpn') }}</a>
 <button type="button" class="btn ghost sm" data-edit data-name="{{ u.name }}" data-id="{{ u.id }}" data-port="{{ u.port }}"
- data-proto="{{ u.proto }}" data-px="{{ 1 if u.px else 0 }}" data-ex="{{ 1 if u.ex else 0 }}" data-speed="{{ '%g'|format(u.speed) if u.speed else 0 }}"
- data-daily="{{ '%g'|format(u.limit_daily) if u.limit_daily else 0 }}" data-total="{{ '%g'|format(u.limit_total) if u.limit_total else 0 }}" data-oa="{{ u.ovpn_addr or '' }}">{{ ic('edit',15) }} {{ t('edit_btn') }}</button>
+ data-proto="{{ u.proto }}" data-mc="{{ u.max_clients }}" data-px="{{ 1 if u.px else 0 }}" data-ex="{{ 1 if u.ex else 0 }}" data-sr="{{ 1 if u.sr else 0 }}" data-speed="{{ '%g'|format(u.speed) if u.speed else 0 }}"
+ data-daily="{{ '%g'|format(u.limit_daily) if u.limit_daily else 0 }}" data-total="{{ '%g'|format(u.limit_total) if u.limit_total else 0 }}" data-oa="{{ u.ovpn_addr or '' }}" data-dns="{{ (u.dns or [])|join(', ') }}" data-rm="{{ (u.backup_remotes or [])|join('|') }}">{{ ic('edit',15) }} {{ t('edit_btn') }}</button>
+{% if u.online_count > 0 or u.ips %}<form class="mini" method="post" action="{{ url_for('kick_user', name=u.name) }}"
+onsubmit='return confirm({{ t("confirm_kick", name=u.name)|tojson }})'><button class="btn ghost sm" title="{{ t('kick_btn') }}">{{ ic('slash',15) }} {{ t('kick_btn') }}</button></form>{% endif %}
 <form class="ext" method="post" action="{{ url_for('extend', name=u.name) }}">
 <input name="days" type="number" inputmode="numeric" min="1" placeholder="{{ t('days_ph') }}" required><button class="btn ghost sm">{{ ic('plus',15) }} {{ t('extend') }}</button></form>
 {% if u.left_txt %}<form class="mini" method="post" action="{{ url_for('unlimit', name=u.name) }}">
@@ -3906,15 +4395,19 @@ onsubmit='return confirm({{ t("confirm_del", name=u.name)|tojson }})'><button cl
 <div class="span2"><label>{{ t('edit_proto') }}</label><div class="seg">
 <label><input type="radio" name="proto" value="udp" id="e_udp"><span>UDP</span></label>
 <label><input type="radio" name="proto" value="tcp" id="e_tcp"><span>TCP</span></label></div></div>
-<div class="span2"><label>{{ t('edit_speed') }}</label><input name="speed" type="number" min="0" max="10000" step="any"></div>
+<div><label>{{ t('edit_speed') }}</label><input name="speed" type="number" min="0" max="10000" step="any"></div>
+<div><label>{{ t('edit_mc') }}</label><input name="max_clients" type="number" min="1" max="50" required></div>
 <div><label>{{ t('edit_daily') }}</label><input name="daily" type="number" min="0" max="1000000" step="any"></div>
 <div><label>{{ t('edit_total') }}</label><input name="total" type="number" min="0" max="1000000" step="any"></div>
 <div class="span2"><label>{{ t('oa_title') }}</label><input name="ovpn_addr" placeholder="{{ t('oa_ph') }}" autocomplete="off" spellcheck="false" style="direction:ltr">
 <p class="hint" style="padding-inline-start:0;margin:6px 0 0">{{ t('eo_hint') }}</p></div>
+<div class="span2"><label>{{ t('edit_dns') }}</label><input name="dns" placeholder="{{ t('edit_dns_ph') }}" autocomplete="off" spellcheck="false" style="direction:ltr"></div>
+<div class="span2"><label>{{ t('edit_remotes') }}</label><textarea name="backup_remotes" rows="2" placeholder="{{ t('edit_remotes_ph') }}" style="width:100%;padding:10px 12px;border-radius:12px;border:1px solid var(--bd);background:var(--inp);color:var(--tx);font:inherit;direction:ltr"></textarea></div>
 </div>
 <div class="rt"><div class="rt-h">{{ ic('globe',16) }} {{ t('ux_title') }}</div>
 <label class="chk"><input type="checkbox" name="px" value="1" id="e_px" {% if px_state != 'ok' %}disabled{% endif %}><span>{{ t('ux_px') }}{% if px_state == 'off' %}<small class="chkh">{{ t('ux_off') }}</small>{% elif px_state == 'all' %}<small class="chkh">{{ t('ux_all') }}</small>{% endif %}</span></label>
-<label class="chk"><input type="checkbox" name="ex" value="1" id="e_ex" {% if ex_state != 'ok' %}disabled{% endif %}><span>{{ t('ux_ex') }}{% if ex_state == 'off' %}<small class="chkh">{{ t('ux_off') }}</small>{% elif ex_state == 'all' %}<small class="chkh">{{ t('ux_all') }}</small>{% endif %}</span></label></div>
+<label class="chk"><input type="checkbox" name="ex" value="1" id="e_ex" {% if ex_state != 'ok' %}disabled{% endif %}><span>{{ t('ux_ex') }}{% if ex_state == 'off' %}<small class="chkh">{{ t('ux_off') }}</small>{% elif ex_state == 'all' %}<small class="chkh">{{ t('ux_all') }}</small>{% endif %}</span></label>
+<label class="chk"><input type="checkbox" name="sr" value="1" id="e_sr" {% if sr_state != 'ok' %}disabled{% endif %}><span>{{ t('ux_sr') }}{% if sr_state == 'off' %}<small class="chkh">{{ t('ux_off') }}</small>{% elif sr_state == 'all' %}<small class="chkh">{{ t('ux_all') }}</small>{% endif %}</span></label></div>
 <div class="dwarn">{{ ic('alert',16) }}<span>{{ t('edit_warn') }}</span></div>
 <div class="dacts">
 <button class="btn">{{ ic('check',16) }} {{ t('edit_save') }}</button>
@@ -3946,13 +4439,15 @@ inp.addEventListener('input',check);
 document.querySelectorAll('.f-proto input[name=proto]').forEach(function(r){r.addEventListener('change',check)});
 })();
 (function(){
-var PXS={{ px_state|tojson }},EXS={{ ex_state|tojson }};
+var PXS={{ px_state|tojson }},EXS={{ ex_state|tojson }},SRS={{ sr_state|tojson }};
 var dlg=document.getElementById('ed'),form=document.getElementById('edf'),els=form.elements,rst=document.getElementById('edr'),cur='';
 document.querySelectorAll('[data-edit]').forEach(function(b){b.addEventListener('click',function(){
  var d=b.dataset;cur=d.name;form.action='/edit/'+d.name;document.getElementById('edn').textContent=d.name;
- els['id'].value=d.id;els['port'].value=d.port;els['speed'].value=d.speed;els['daily'].value=d.daily;els['total'].value=d.total;els['ovpn_addr'].value=d.oa||'';
+ els['id'].value=d.id;els['port'].value=d.port;els['max_clients'].value=d.mc||'1';els['speed'].value=d.speed;els['daily'].value=d.daily;els['total'].value=d.total;
+ els['ovpn_addr'].value=d.oa||'';els['dns'].value=d.dns||'';els['backup_remotes'].value=(d.rm||'').split('|').join('\\n');
  document.getElementById('e_'+d.proto).checked=true;rst.formAction='/reset/'+d.name;
  document.getElementById('e_px').checked=PXS==='all'||d.px==='1';document.getElementById('e_ex').checked=EXS==='all'||d.ex==='1';
+ document.getElementById('e_sr').checked=SRS==='all'||d.sr==='1';
  dlg.showModal();});});
 rst.addEventListener('click',function(e){if(!confirm(I.confirm_reset.replace('{name}',cur)))e.preventDefault();});
 document.getElementById('edc').addEventListener('click',function(){dlg.close()});
@@ -4017,6 +4512,9 @@ DASHBOARD_HTML = """
 
 <dialog id="dnsd" class="dlg"><div class="dlg-in"><form method="post" action="{{ url_for('dash_dns') }}">
 <h3>{{ ic('edit',18) }} {{ t('dash_dns_title') }}</h3>
+<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+{% for k, p in dns_presets.items() %}<button type="button" class="btn ghost sm" onclick="document.querySelector('#dnsd input[name=dns]').value='{{ p.servers|join(', ') }}'">{{ p.label }}</button>{% endfor %}
+</div>
 <label>{{ t('dash_dns_label') }}</label>
 <input name="dns" value="{{ dns|join(', ') }}" placeholder="{{ t('dash_dns_ph') }}" autocomplete="off" spellcheck="false" style="direction:ltr" required>
 <div class="dwarn">{{ ic('alert',16) }}<span>{{ t('dash_dns_hint') }}</span></div>
@@ -4037,9 +4535,10 @@ DASHBOARD_HTML = """
 <button type="button" class="btn ghost sm" id="a_pbtn">{{ ic('edit',15) }} <span>{{ t('c_manual') }}</span></button></div>
 <span id="a_pmsg" style="display:block;font-size:12px;margin-top:4px;min-height:18px"></span></div>
 <div><label>{{ t('c_days') }}</label><input name="days" type="number" inputmode="numeric" min="0" max="3650" value="30"></div>
+<div><label>{{ t('c_mc') }}</label><input name="max_clients" type="number" inputmode="numeric" min="1" max="50" value="1"></div>
 <div><label>{{ t('c_speed') }}</label><input name="speed" type="number" inputmode="decimal" min="0" max="10000" step="any" value="0"></div>
 <div><label>{{ t('c_daily') }}</label><input name="daily" type="number" inputmode="decimal" min="0" max="1000000" step="any" value="0"></div>
-<div><label>{{ t('c_total') }}</label><input name="total" type="number" inputmode="decimal" min="0" max="1000000" step="any" value="0"></div>
+<div class="span2"><label>{{ t('c_total') }}</label><input name="total" type="number" inputmode="decimal" min="0" max="1000000" step="any" value="0"></div>
 </div>
 <div class="dacts" style="margin-top:16px"><button class="btn">{{ ic('plus',16) }} {{ t('c_btn') }}</button><button type="button" class="btn ghost" id="a_c">{{ t('edit_cancel') }}</button></div>
 </form></div></dialog>
@@ -4275,9 +4774,10 @@ function load(){
    last=u.online?('<b>'+I.u_online+'</b> · '+I.u_since+' '+dt(u.since||u.last)):(u.last?dt(u.last)+'<span class="sub">'+ago(u.last,d.now)+'</span>':I.u_never);
    h+='<div class="ucard"><div class="uh"><div class="av">'+u.name[0].toUpperCase()+'</div><div class="grow"><b><span class="dot '+(u.online?'on':'off')+'"></span>'+u.name+'</b>'+
    '<div class="tags"><span class="tag">ID #'+u.id+'</span><span class="tag">'+I.port+' '+u.port+'</span><span class="tag">'+u.proto.toUpperCase()+'</span>'+
+   '<span class="tag">'+(u.online_count||0)+'/'+(u.max_clients||1)+'</span>'+
    (u.blocked?'<span class="tag bad">'+IC.slash+I['blk_'+u.blocked]+'</span>':'')+'</div></div>'+
    '<span class="pill '+(u.online?'on':'')+'">'+(u.online?I.u_online:I.u_offline)+'</span></div>'+
-   '<div class="kv">'+row(IC.server,I.u_local_ip,u.ip?'<span class="mono">'+u.ip+'</span>':'—')+row(IC.clock,I.u_last,last)+
+   '<div class="kv">'+row(IC.server,I.u_local_ip,(u.ips&&u.ips.length)?'<span class="mono">'+u.ips.join(', ')+'</span>':(u.ip?'<span class="mono">'+u.ip+'</span>':'—'))+row(IC.clock,I.u_last,last)+
    row(IC.calendar,I.th_created,ds(u.created)+'<span class="sub">'+I.d_ago.replace('{n}',days)+'</span>')+'</div>'+
    '<div class="tgrid"><div class="tg">'+I.th_down+'<b class="dn">'+fb(u.down)+'</b></div><div class="tg">'+I.th_up+'<b class="upc">'+fb(u.up)+'</b></div>'+
    '<div class="tg">'+I.th_total+'<b>'+fb(u.tot)+'</b></div><div class="tg">'+I.u_today+'<b>'+fb(u.day_up+u.day_down)+'</b></div></div>'+
@@ -4492,6 +4992,102 @@ setTimeout(poll,1500);
 </div>
 """
 
+ADV_RT_HTML = """
+<style>.pxx select,.pxx textarea,.two-col select{width:100%;padding:11px 13px;border-radius:12px;border:1px solid var(--bd);background:var(--inp);color:var(--tx);font:inherit;outline:none}
+.pxx textarea{resize:vertical;min-height:110px;font-size:13px;direction:ltr}.pxx option,.two-col option{background:var(--bg);color:var(--tx)}
+.pxx .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}</style>
+<div class="two-col">
+<div class="card"><h3>{{ ic('globe') }} {{ t('rt_dns_title') }}</h3>
+<p class="muted">{{ t('rt_dns_desc') }}</p>
+<form method="post" action="{{ url_for('adv_rt_dns') }}" class="stack">
+<div><label>{{ t('rt_dns_preset') }}</label><select name="preset" onchange="var m=this.selectedOptions[0].dataset.ips;if(m)this.form.elements['dns'].value=m;" style="width:100%;padding:11px 13px;border-radius:12px;border:1px solid var(--bd);background:var(--inp);color:var(--tx);font:inherit">
+<option value="custom" {% if rt_dns.preset=='custom' %}selected{% endif %}>{{ t('rt_dns_custom') }}</option>
+{% for k, p in dns_presets.items() %}<option value="{{ k }}" data-ips="{{ p.servers|join(', ') }}" {% if rt_dns.preset==k %}selected{% endif %}>{{ p.label }} ({{ p.servers|join(', ') }})</option>{% endfor %}
+</select></div>
+<div><label>{{ t('dash_dns_label') }}</label><input name="dns" value="{{ rt_dns.servers|join(', ') }}" placeholder="1.1.1.1, 1.0.0.1" class="mono" style="direction:ltr" required></div>
+<div><button class="btn">{{ ic('check',16) }} {{ t('rt_dns_apply') }}</button></div></form>
+</div>
+
+<div class="card"><h3>{{ ic('shield') }} {{ t('rt_ab_title') }}</h3>
+<p class="muted">{{ t('rt_ab_desc') }}</p>
+<form method="post" action="{{ url_for('adv_rt_abuse') }}" class="stack">
+<label class="chk"><input type="checkbox" name="enabled" value="1" {% if rt_ab.enabled %}checked{% endif %}><span>{{ t('rt_ab_enable') }}</span></label>
+<label class="chk"><input type="checkbox" name="block_smtp" value="1" {% if rt_ab.block_smtp %}checked{% endif %}><span>{{ t('rt_ab_smtp') }}</span></label>
+<label class="chk"><input type="checkbox" name="block_smtp_alt" value="1" {% if rt_ab.block_smtp_alt %}checked{% endif %}><span>{{ t('rt_ab_smtp_alt') }}</span></label>
+<label class="chk"><input type="checkbox" name="block_torrent" value="1" {% if rt_ab.block_torrent %}checked{% endif %}><span>{{ t('rt_ab_p2p') }}</span></label>
+<label class="chk"><input type="checkbox" name="block_torrent_dpi" value="1" {% if rt_ab.block_torrent_dpi %}checked{% endif %}><span>{{ t('rt_ab_dpi') }}</span></label>
+<div><label>{{ t('rt_ab_ports') }}</label><input name="custom_blocked_ports" value="{{ (rt_ab.custom_blocked_ports or [])|join(', ') }}" placeholder="e.g. 2525, 119" class="mono" style="direction:ltr"></div>
+<div><button class="btn">{{ ic('check',16) }} {{ t('px_save') }}</button></div></form>
+</div>
+</div>
+
+<div class="card pxx" style="margin-top:18px"><h3>{{ ic('zap') }} {{ t('rt_bp_title') }}</h3>
+<p class="muted">{{ t('rt_bp_desc') }}</p>
+<form method="post" action="{{ url_for('adv_rt_bypass') }}" class="stack">
+<label class="chk"><input type="checkbox" name="enabled" value="1" {% if rt_bp.enabled %}checked{% endif %}><span>{{ t('rt_bp_enable') }}</span></label>
+<div><label>{{ t('rt_bp_presets') }}</label>
+{% for k, p in bp_presets.items() %}<label class="chk"><input type="checkbox" name="presets" value="{{ k }}" {% if k in rt_bp.presets %}checked{% endif %}><span>{{ p.label }} ({{ p.domains|length }} domains)</span></label>{% endfor %}
+</div>
+<div><label>{{ t('rt_bp_cidrs') }}</label><textarea name="custom_cidrs" class="mono" placeholder="194.225.0.0/16">{{ (rt_bp.custom_cidrs or [])|join('\\n') }}</textarea></div>
+<div><label>{{ t('rt_bp_doms') }}</label><textarea name="custom_domains" class="mono" placeholder="bankmellat.ir">{{ (rt_bp.custom_domains or [])|join('\\n') }}</textarea></div>
+<div class="grid2">
+<div><label>{{ t('rt_bp_max') }}</label><input name="max_routes" type="number" min="1" max="500" value="{{ rt_bp.max_routes }}"></div>
+<div><label>{{ t('rt_bp_hours') }}</label><input name="resolve_hours" type="number" min="1" max="168" value="{{ rt_bp.resolve_hours }}"></div>
+</div>
+<div class="row">
+<button class="btn">{{ ic('check',16) }} {{ t('px_save') }}</button>
+</div></form>
+<form method="post" action="{{ url_for('adv_rt_bypass_resolve') }}" style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<button class="btn ghost sm">{{ ic('refresh',14) }} {{ t('rt_bp_resolve') }}</button>
+<span class="tag">{{ rt_bp.route_count }} routes{% if rt_bp.truncated %} (capped){% endif %}</span>
+</form>
+</div>
+
+<div class="card pxx" style="margin-top:18px"><h3>{{ ic('sliders') }} {{ t('rt_sm_title') }}</h3>
+<p class="muted">{{ t('rt_sm_desc') }}</p>
+<div style="margin-bottom:10px"><span class="pill {% if rt_sm.warp_reachable %}on{% endif %}">{% if rt_sm.warp_reachable %}{{ t('rt_sm_warp_ok', ms=rt_sm.warp_ms or 0) }}{% else %}{{ t('rt_sm_warp_bad', port=rt_sm.warp_port) }}{% endif %}</span></div>
+<form method="post" action="{{ url_for('adv_rt_smart') }}" class="stack">
+<label class="chk"><input type="checkbox" name="enabled" value="1" {% if rt_sm.enabled %}checked{% endif %}><span>{{ t('rt_sm_enable') }}</span></label>
+<label class="chk"><input type="checkbox" name="all_users" value="1" {% if rt_sm.all_users %}checked{% endif %}><span>{{ t('rt_sm_all') }}</span></label>
+<div class="grid2">
+<div><label>{{ t('rt_sm_mode') }}</label><select name="mode">
+<option value="domains_only" {% if rt_sm.mode=='domains_only' %}selected{% endif %}>{{ t('rt_sm_m_dom') }}</option>
+<option value="all" {% if rt_sm.mode=='all' %}selected{% endif %}>{{ t('rt_sm_m_all') }}</option>
+</select></div>
+<div><label>{{ t('rt_sm_target') }}</label><select name="target">
+<option value="auto" {% if rt_sm.target=='auto' %}selected{% endif %}>{{ t('rt_sm_t_auto') }}</option>
+<option value="warp" {% if rt_sm.target=='warp' %}selected{% endif %}>{{ t('rt_sm_t_warp') }}</option>
+<option value="exit" {% if rt_sm.target=='exit' %}selected{% endif %}>{{ t('rt_sm_t_exit') }}</option>
+<option value="proxy" {% if rt_sm.target=='proxy' %}selected{% endif %}>{{ t('rt_sm_t_proxy') }}</option>
+</select></div>
+<div><label>{{ t('rt_sm_warp_h') }}</label><input name="warp_host" value="{{ rt_sm.warp_host }}" class="mono" style="direction:ltr"></div>
+<div><label>{{ t('rt_sm_warp_p') }}</label><input name="warp_port" type="number" min="1" max="65535" value="{{ rt_sm.warp_port }}"></div>
+</div>
+<div><label>{{ t('rt_sm_presets') }}</label>
+{% for k, p in sm_presets.items() %}<label class="chk"><input type="checkbox" name="presets" value="{{ k }}" {% if k in rt_sm.presets %}checked{% endif %}><span>{{ p.label }} ({{ p.domains|length }})</span></label>{% endfor %}
+</div>
+<div><label>{{ t('rt_sm_doms') }}</label><textarea name="domains" class="mono" placeholder="openai.com">{{ (rt_sm.domains or [])|join('\\n') }}</textarea></div>
+<div><label>{{ t('rt_sm_ports') }}</label><input name="ports" value="{{ (rt_sm.ports or [])|join(', ') }}" class="mono" style="direction:ltr"></div>
+<label class="chk"><input type="checkbox" name="block_quic" value="1" {% if rt_sm.block_quic %}checked{% endif %}><span>{{ t('px_quic') }}</span></label>
+<label class="chk"><input type="checkbox" name="fallback_direct" value="1" {% if rt_sm.fallback_direct %}checked{% endif %}><span>{{ t('px_fb') }}</span></label>
+<div><button class="btn">{{ ic('check',16) }} {{ t('px_save') }}</button></div></form>
+</div>
+
+<div class="card pxx" style="margin-top:18px"><h3>{{ ic('server') }} {{ t('rt_rm_title') }}</h3>
+<p class="muted">{{ t('rt_rm_desc') }}</p>
+<form method="post" action="{{ url_for('adv_rt_remotes') }}" class="stack">
+<label class="chk"><input type="checkbox" name="enabled" value="1" {% if rt_rm.enabled %}checked{% endif %}><span>{{ t('rt_rm_enable') }}</span></label>
+<div><label>{{ t('rt_rm_list') }}</label><textarea name="remotes" class="mono" placeholder="ir2.example.com&#10;backup.example.com:443:tcp">{{ (rt_rm.remotes or [])|join('\\n') }}</textarea></div>
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px">
+<div><label>{{ t('rt_rm_rmin') }}</label><input name="connect_retry_min" type="number" min="1" max="60" value="{{ rt_rm.connect_retry_min }}"></div>
+<div><label>{{ t('rt_rm_rmax') }}</label><input name="connect_retry_max" type="number" min="1" max="120" value="{{ rt_rm.connect_retry_max }}"></div>
+<div><label>{{ t('rt_rm_to') }}</label><input name="connect_timeout" type="number" min="3" max="60" value="{{ rt_rm.connect_timeout }}"></div>
+</div>
+<label class="chk"><input type="checkbox" name="remote_random" value="1" {% if rt_rm.remote_random %}checked{% endif %}><span>{{ t('rt_rm_rand') }}</span></label>
+<div><button class="btn">{{ ic('check',16) }} {{ t('px_save') }}</button></div></form>
+</div>
+"""
+
 
 try:
     from api_v1 import register_api_v1
@@ -4511,5 +5107,6 @@ if __name__ == "__main__":
     threading.Thread(target=sampler, daemon=True).start()
     threading.Thread(target=exit_ip, daemon=True).start()
     threading.Thread(target=hist_loop, daemon=True).start()
+    threading.Thread(target=ROUTING.bypass_resolver_loop, daemon=True).start()
     proxy_start()
     app.run(host=HOST, port=PORT, threaded=True)

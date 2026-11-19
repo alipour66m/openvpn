@@ -89,11 +89,15 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
         disabled = bool(u.get("disabled"))
         expires = u.get("expires")
         is_expired = bool(expires and float(expires) <= time.time())
+        mc = max(1, min(50, int(u.get("max_clients") or 1)))
+        online = bool(cn.get("online"))
+        ips = list(cn.get("ips") or ([cn["ip"]] if cn.get("ip") else []))
         return {
             "id": u["id"],
             "name": name,
             "port": u["port"],
             "proto": u.get("proto", "udp"),
+            "max_clients": mc,
             "created": u["created"],
             "expires": expires,
             "is_expired": is_expired,
@@ -107,15 +111,21 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
             "disabled": disabled,
             "blocked": blocked,
             "enable": (not disabled) and (blocked is None) and (not is_expired),
-            "online": bool(cn.get("online")),
+            "online": online,
+            "online_count": int(cn.get("online_count") or (1 if online else 0)),
             "ip": cn.get("ip"),
+            "ips": ips,
+            "sessions": cn.get("sessions") or [],
             "last": cn.get("last"),
             "since": cn.get("since"),
             "rate_up": ru,
             "rate_down": rd,
             "ovpn_addr": u.get("ovpn_addr"),
+            "dns": u.get("dns"),
+            "backup_remotes": u.get("backup_remotes") or [],
             "px": bool(u.get("px")),
             "ex": bool(u.get("ex")),
+            "sr": bool(u.get("sr")),
             "portal_token": portal_token,
         }
 
@@ -173,17 +183,20 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
         users = deps["load_state"]()["users"]
         with slock:
             online = sum(1 for u in users if deps["CONN"].get(u["name"], {}).get("online"))
+            sessions_online = sum(int(deps["CONN"].get(u["name"], {}).get("online_count") or (1 if deps["CONN"].get(u["name"], {}).get("online") else 0)) for u in users)
             sys_info = dict(deps["SYS"])
         blocked = sum(1 for u in users if u.get("blocked") or u.get("disabled"))
         return jsonify(
             ok=True,
-            api_version="1.1",
+            api_version="1.2",
             app=deps["APP_NAME"],
             now=time.time(),
             users_total=len(users),
             users_online=online,
+            sessions_online=sessions_online,
             users_blocked=blocked,
             users_active=max(0, len(users) - blocked),
+            routing=deps["ROUTING"].status_summary(),
             sys={
                 "cpu": sys_info.get("cpu", 0),
                 "cores": os.cpu_count() or 1,
@@ -207,6 +220,7 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
             days = int(body.get("days") or 0)
             expires_raw = body.get("expires")
             expires_val = float(expires_raw) if expires_raw is not None else None
+            mc = int(body.get("max_clients") or body.get("limit_ip") or 1)
             speed = round(float(body.get("speed") or 0), 2)
             daily = round(float(body.get("daily") or 0), 3)
             total = round(float(body.get("total") or 0), 3)
@@ -217,6 +231,28 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
 
         oa = str(body.get("ovpn_addr") or "").strip()
         disabled = bool(body.get("disabled", False))
+
+        raw_dns = body.get("dns")
+        user_dns: list[str] | None = None
+        if raw_dns:
+            dns_str = " ".join(str(x) for x in raw_dns) if isinstance(raw_dns, list) else str(raw_dns)
+            user_dns = deps["parse_dns"](dns_str)
+            if user_dns is None:
+                return _err("invalid dns list (1 to 4 IPv4 addresses)", 422)
+
+        raw_rem = body.get("backup_remotes")
+        user_remotes: list[str] = []
+        if raw_rem:
+            rem_list = raw_rem if isinstance(raw_rem, list) else str(raw_rem).splitlines()
+            for r_item in rem_list:
+                s = str(r_item).strip()
+                if not s:
+                    continue
+                pr = deps["parse_backup_remote"](s)
+                if not pr:
+                    return _err(f"invalid backup remote: {s}", 422)
+                if pr["raw"] not in user_remotes:
+                    user_remotes.append(pr["raw"])
 
         def _pick_min_port(st_obj: dict[str, Any], start_floor: int, proto_val: str) -> int | None:
             skip = {8088, 8089, 2096, 8443}
@@ -246,6 +282,8 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
                 err = "invalid name (1..32 chars: A-Za-z0-9_-)"
             elif proto not in ("udp", "tcp"):
                 err = "proto must be udp or tcp"
+            elif not 1 <= mc <= 50:
+                err = "max_clients must be between 1 and 50"
             elif not 0 <= days <= 3650:
                 err = "days must be between 0 and 3650"
             elif not 0 <= speed <= 10000:
@@ -265,7 +303,7 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
 
             idx = deps["free_id"](st)
             sub = deps["new_subnet"](idx, st)
-            ok, cerr = deps["create_instance"](name, port, sub, proto)
+            ok, cerr = deps["create_instance"](name, port, sub, proto, mc)
             if not ok:
                 return _err("instance creation failed", 500, detail=str(cerr))
 
@@ -283,18 +321,26 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
                 "created": now,
                 "expires": final_exp,
                 "proto": proto,
+                "max_clients": mc,
                 "speed": speed or None,
                 "limit_daily": daily or None,
                 "limit_total": total or None,
                 "ovpn_addr": oa or None,
+                "dns": user_dns,
+                "backup_remotes": user_remotes or None,
+                "sr": bool(body.get("sr", False)),
                 "disabled": disabled,
                 "blocked": "manual" if disabled else None,
             }
+            if user_dns:
+                deps["ROUTING"].sync_user_ccd(name, user_dns)
             st["users"].append(user)
             st["users"].sort(key=lambda u: u["id"])
             deps["save_state"](st)
             if speed:
                 deps["apply_speed"](user)
+        if user.get("sr"):
+            deps["proxy_sync_rules"]()
         if disabled:
             deps["enforce_blocks"]()
         return jsonify(ok=True, user=_serialize_user(user)), 201
@@ -325,21 +371,60 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
 
             others = {"users": [x for x in st["users"] if x["name"] != name]}
             old_proto = u.get("proto", "udp")
+            old_mc = max(1, min(50, int(u.get("max_clients") or 1)))
             proto = str(body.get("proto", old_proto)).lower().strip()
             oa = str(body.get("ovpn_addr", u.get("ovpn_addr") or "") or "").strip()
 
             try:
                 new_id = int(body.get("id", u["id"]))
                 new_port = int(body.get("port", u["port"]))
+                mc_raw = body.get("max_clients", body.get("limit_ip", old_mc))
+                mc = int(mc_raw) if mc_raw is not None else old_mc
                 speed = round(float(body.get("speed") if "speed" in body else (u.get("speed") or 0)) or 0, 2)
                 daily = round(float(body.get("daily") if "daily" in body else (u.get("limit_daily") or 0)) or 0, 3)
                 total = round(float(body.get("total") if "total" in body else (u.get("limit_total") or 0)) or 0, 3)
             except (TypeError, ValueError):
                 return _err("invalid numeric parameter", 400)
 
+            user_dns = u.get("dns")
+            dns_changed = False
+            if "dns" in body:
+                raw_dns = body.get("dns")
+                if not raw_dns:
+                    user_dns = None
+                    dns_changed = True
+                else:
+                    dns_str = " ".join(str(x) for x in raw_dns) if isinstance(raw_dns, list) else str(raw_dns)
+                    user_dns = deps["parse_dns"](dns_str)
+                    if user_dns is None:
+                        return _err("invalid dns list (1 to 4 IPv4 addresses)", 422)
+                    dns_changed = True
+
+            user_remotes = u.get("backup_remotes")
+            if "backup_remotes" in body:
+                raw_rem = body.get("backup_remotes")
+                if not raw_rem:
+                    user_remotes = None
+                else:
+                    rem_list = raw_rem if isinstance(raw_rem, list) else str(raw_rem).splitlines()
+                    user_remotes = []
+                    for r_item in rem_list:
+                        s = str(r_item).strip()
+                        if not s:
+                            continue
+                        pr = deps["parse_backup_remote"](s)
+                        if not pr:
+                            return _err(f"invalid backup remote: {s}", 422)
+                        if pr["raw"] not in user_remotes:
+                            user_remotes.append(pr["raw"])
+                    if not user_remotes:
+                        user_remotes = None
+
             err = None
             if proto not in ("udp", "tcp"):
                 err = "proto must be udp or tcp"
+            elif not 1 <= mc <= 50:
+                err = "max_clients must be between 1 and 50"
             elif new_id < 1 or any(x["id"] == new_id for x in others["users"]):
                 err = "invalid or duplicate id"
             elif not 0 <= speed <= 10000:
@@ -362,17 +447,22 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
                     return _err("days must be between 0 and 3650", 422)
                 u["expires"] = (time.time() + days * 86400) if days > 0 else None
 
-            if (new_id, new_port, proto) != (u["id"], u["port"], old_proto):
-                ok, e = deps["edit_instance"](u, new_id, new_port, proto)
+            if (new_id, new_port, proto, mc) != (u["id"], u["port"], old_proto, old_mc):
+                ok, e = deps["edit_instance"](u, new_id, new_port, proto, mc)
                 if not ok:
                     return _err("instance update failed", 500, detail=str(e))
                 if u.get("blocked"):
                     deps["run"](["systemctl", "disable", "--now", f"openvpn-server@{name}"])
 
+            u["max_clients"] = mc
             u["speed"] = speed or None
             u["limit_daily"] = daily or None
             u["limit_total"] = total or None
             u["ovpn_addr"] = oa or None
+            u["dns"] = user_dns
+            u["backup_remotes"] = user_remotes
+            if dns_changed:
+                deps["ROUTING"].sync_user_ccd(name, user_dns or [])
 
             if "disabled" in body:
                 u["disabled"] = bool(body["disabled"])
@@ -384,6 +474,8 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
                 u["px"] = bool(body["px"])
             if ex_st == "ok" and "ex" in body:
                 u["ex"] = bool(body["ex"])
+            if deps["smart_feature_state"]() == "ok" and "sr" in body:
+                u["sr"] = bool(body["sr"])
 
             st["users"].sort(key=lambda x: x["id"])
             deps["save_state"](st)
@@ -499,3 +591,74 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
         proto = proto if proto in ("udp", "tcp") else "udp"
         err = deps["port_error"](deps["load_state"](), port, proto)
         return jsonify(ok=True, free=(err is None), port=port, proto=proto, msg=err or "free")
+
+    @app.route("/api/v1/users/<name>/kick", methods=["POST"])
+    @api_auth
+    def api_v1_user_kick(name: str):
+        u = next((x for x in deps["load_state"]()["users"] if x["name"] == name), None)
+        if not u:
+            return _err("user not found", 404)
+        body = _json_body()
+        cid = body.get("cid")
+        ok, count = deps["mgmt_kill_client"](name, cid)
+        return jsonify(ok=ok, kicked=count, name=name)
+
+    @app.route("/api/v1/routing/bypass", methods=["GET", "POST"])
+    @api_auth
+    def api_v1_routing_bypass():
+        rt = deps["ROUTING"]
+        if request.method == "GET":
+            return jsonify(ok=True, bypass=rt.get_bypass())
+        body = _json_body()
+        resolve_now = bool(body.get("resolve_now", body.get("enabled", rt.bypass.get("enabled"))))
+        res = rt.save_bypass(body, resolve_now=resolve_now)
+        return jsonify(ok=True, bypass=res)
+
+    @app.route("/api/v1/routing/bypass/resolve", methods=["POST"])
+    @api_auth
+    def api_v1_routing_bypass_resolve():
+        info = deps["ROUTING"].resolve_bypass_domains(sync_ccd=True)
+        return jsonify(ok=True, resolve=info)
+
+    @app.route("/api/v1/routing/abuse", methods=["GET", "POST"])
+    @api_auth
+    def api_v1_routing_abuse():
+        rt = deps["ROUTING"]
+        if request.method == "GET":
+            return jsonify(ok=True, abuse=rt.get_abuse())
+        res = rt.save_abuse(_json_body())
+        return jsonify(ok=True, abuse=res)
+
+    @app.route("/api/v1/routing/smart", methods=["GET", "POST"])
+    @api_auth
+    def api_v1_routing_smart():
+        rt = deps["ROUTING"]
+        if request.method == "GET":
+            return jsonify(ok=True, smart=rt.get_smart())
+        res = rt.save_smart(_json_body())
+        return jsonify(ok=True, smart=res)
+
+    @app.route("/api/v1/routing/dns", methods=["GET", "POST"])
+    @api_auth
+    def api_v1_routing_dns():
+        rt = deps["ROUTING"]
+        if request.method == "GET":
+            return jsonify(ok=True, **rt.get_dns_state())
+        if not deps["host_ready"]():
+            return _err("openvpn host is not ready", 422)
+        body = _json_body()
+        target = body.get("preset") or body.get("servers") or body.get("dns") or ""
+        with lock:
+            ok, msg, servers = rt.apply_dns(target)
+        if not ok:
+            return _err(msg, 422)
+        return jsonify(ok=True, status=msg, **rt.get_dns_state())
+
+    @app.route("/api/v1/routing/remotes", methods=["GET", "POST"])
+    @api_auth
+    def api_v1_routing_remotes():
+        rt = deps["ROUTING"]
+        if request.method == "GET":
+            return jsonify(ok=True, remotes=rt.get_remotes())
+        res = rt.save_remotes(_json_body())
+        return jsonify(ok=True, remotes=res)
