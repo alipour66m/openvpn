@@ -31,6 +31,14 @@ except ImportError:
     from panel.routing import (BYPASS_PRESETS, DEFAULT_SMART_PORTS, DNS_PRESETS, SMART_PRESETS,
                                RoutingManager, conf_with_max_clients, extract_sni_or_host, parse_backup_remote)
 
+try:
+    from geoip import GeoIPManager as _GeoIPManager  # type: ignore
+except ImportError:
+    try:
+        from panel.geoip import GeoIPManager as _GeoIPManager  # type: ignore
+    except ImportError:
+        _GeoIPManager = None  # type: ignore
+
 APP_NAME = "GassLight"
 BASE = os.environ.get("PANEL_DATA", "/opt/ovpn-panel")
 DB = f"{BASE}/users.json"
@@ -2644,6 +2652,7 @@ ROUTING = RoutingManager(
     read_dns_fn=read_dns,
     restart_for_dns_fn=restart_for_dns,
     proxy_sync_fn=proxy_sync_rules,
+    geoip=_GeoIPManager(auto_update=True) if _GeoIPManager is not None else None,
 )
 
 

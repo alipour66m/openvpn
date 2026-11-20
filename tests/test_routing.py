@@ -385,3 +385,148 @@ class RoutingManagerTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeoIPTestCase(unittest.TestCase):
+    """Tests for GeoIPManager and RoutingManager GeoIP integration.
+
+    These tests run offline using a mock GeoIP provider so no network access
+    or real MMDB file is required.
+    """
+
+    # ---------------------------------------------------------------------- mock
+    class MockGeoIP:
+        """Minimal GeoIP stand-in returning synthetic CIDRs."""
+
+        # 60 non-overlapping /24 networks spread across different /8s → collapse leaves 60
+        COUNTRY_DATA: dict[str, list[str]] = {
+            "IR": [f"{10 + i}.100.1.0/24" for i in range(60)] + ["78.39.0.0/16", "194.225.0.0/16"],
+            "NL": ["145.220.0.0/16", "185.86.148.0/22"],
+        }
+
+        def country_cidrs(self, iso: str) -> list[str]:
+            return list(self.COUNTRY_DATA.get(iso.upper(), []))
+
+        def available_countries(self) -> list[str]:
+            return sorted(self.COUNTRY_DATA.keys())
+
+        def status(self) -> dict:
+            return {"mmdb_lite_loaded": True, "ir_networks": len(self.COUNTRY_DATA["IR"])}
+
+        def _lookup_ip_country(self, ip: str) -> str | None:
+            return "IR" if ip.startswith("78.") else None
+
+    def _make_rm(self, geoip=None) -> RoutingManager:
+        tmpdir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(tmpdir, "srv"), exist_ok=True)
+        return RoutingManager(
+            base_dir=tmpdir,
+            server_dir=os.path.join(tmpdir, "srv"),
+            run_fn=lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),
+            load_state_fn=lambda: {"users": []},
+            set_dns_fn=lambda x: (True, ""),
+            read_dns_fn=lambda: [],
+            restart_for_dns_fn=lambda: None,
+            proxy_sync_fn=lambda: None,
+            geoip=geoip,
+        )
+
+    # ---------------------------------------------------------------------- tests
+    def test_geoip_disabled_when_no_provider(self) -> None:
+        """With no GeoIP provider, geoip_enabled=True should produce 0 routes."""
+        rm = self._make_rm(geoip=None)
+        res = rm.save_bypass(
+            {"enabled": True, "geoip_enabled": True, "geoip_countries": ["IR"], "presets": []},
+            resolve_now=False,
+        )
+        self.assertEqual(res["route_count"], 0)
+        self.assertFalse(res.get("geoip_available", False))
+
+    def test_geoip_country_bypass_produces_routes(self) -> None:
+        """With a GeoIP provider, geoip_countries=['IR'] must produce capped routes."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        res = rm.save_bypass(
+            {"enabled": True, "geoip_enabled": True, "geoip_countries": ["IR"], "presets": [], "max_routes": 50},
+            resolve_now=False,
+        )
+        # MockGeoIP returns 62 IR CIDRs → after collapse they may be fewer → capped at min(collapsed, 50)
+        self.assertGreater(res["route_count"], 0)
+        self.assertLessEqual(res["route_count"], 50)
+        self.assertGreater(res["total_before_cap"], 0)
+        self.assertTrue(res["geoip_available"])
+
+    def test_geoip_flag_off_produces_no_geoip_routes(self) -> None:
+        """geoip_enabled=False must skip GeoIP even if countries are listed."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        res = rm.save_bypass(
+            {"enabled": True, "geoip_enabled": False, "geoip_countries": ["IR"], "presets": []},
+            resolve_now=False,
+        )
+        self.assertEqual(res["route_count"], 0)
+
+    def test_geoip_combined_with_custom_cidrs(self) -> None:
+        """GeoIP routes and custom CIDRs must be merged and collapsed correctly."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        res = rm.save_bypass(
+            {
+                "enabled": True,
+                "geoip_enabled": True,
+                "geoip_countries": ["IR"],
+                "custom_cidrs": ["10.20.30.0/24"],
+                "presets": [],
+                "max_routes": 500,
+            },
+            resolve_now=False,
+        )
+        # IR (51) + 1 custom = 52 total (all fit in 500)
+        self.assertGreater(res["route_count"], 1)
+        self.assertFalse(res["truncated"])
+
+    def test_geoip_multiple_countries(self) -> None:
+        """Multiple countries in geoip_countries must be unioned."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        res_ir = rm.save_bypass(
+            {"enabled": True, "geoip_enabled": True, "geoip_countries": ["IR"], "presets": [], "max_routes": 500},
+            resolve_now=False,
+        )
+        res_both = rm.save_bypass(
+            {"enabled": True, "geoip_enabled": True, "geoip_countries": ["IR", "NL"], "presets": [], "max_routes": 500},
+            resolve_now=False,
+        )
+        self.assertGreater(res_both["total_before_cap"], res_ir["total_before_cap"])
+
+    def test_geoip_invalid_iso_ignored(self) -> None:
+        """Invalid or empty ISO codes must be silently ignored."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        res = rm.save_bypass(
+            {"enabled": True, "geoip_enabled": True, "geoip_countries": ["", "123", "TOOLONGCODE", "IR"], "presets": []},
+            resolve_now=False,
+        )
+        # Only IR is valid → routes from IR only
+        self.assertGreater(res["route_count"], 0)
+
+    def test_get_bypass_includes_geoip_status(self) -> None:
+        """get_bypass() must include geoip_available and geoip_status when configured."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        snap = rm.get_bypass()
+        self.assertTrue(snap["geoip_available"])
+        self.assertIn("geoip_status", snap)
+
+    def test_bypass_persisted_with_geoip_fields(self) -> None:
+        """geoip_enabled and geoip_countries must survive a JSON round-trip."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        rm.save_bypass(
+            {"enabled": True, "geoip_enabled": True, "geoip_countries": ["IR", "NL"], "presets": []},
+            resolve_now=False,
+        )
+        # Re-read from persisted JSON
+        import json
+        with open(rm.bypass_file, encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertTrue(saved["geoip_enabled"])
+        self.assertIn("IR", saved["geoip_countries"])
+        self.assertIn("NL", saved["geoip_countries"])
+
+
+if __name__ == "__main__":
+    unittest.main()

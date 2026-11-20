@@ -12,6 +12,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterable
 
+try:
+    from .geoip import GeoIPManager  # type: ignore
+except ImportError:
+    try:
+        from geoip import GeoIPManager  # type: ignore
+    except ImportError:
+        GeoIPManager = None  # type: ignore
+
 DNS_PRESETS: dict[str, dict[str, Any]] = {
     "cloudflare": {"label": "Cloudflare", "servers": ["1.1.1.1", "1.0.0.1"]},
     "adguard": {"label": "AdGuard (AdBlock)", "servers": ["94.140.14.14", "94.140.15.15"]},
@@ -521,6 +529,7 @@ class RoutingManager:
         read_dns_fn: Callable[[], list[str]],
         restart_for_dns_fn: Callable[[], None],
         proxy_sync_fn: Callable[[], None],
+        geoip: "GeoIPManager | None" = None,
     ) -> None:
         self.base_dir = base_dir
         self.server_dir = server_dir
@@ -531,6 +540,7 @@ class RoutingManager:
         self.restart_for_dns = restart_for_dns_fn
         self.proxy_sync = proxy_sync_fn
         self.lock = threading.RLock()
+        self._geoip = geoip
 
         self.bypass_file = os.path.join(base_dir, "bypass.json")
         self.abuse_file = os.path.join(base_dir, "abuse.json")
@@ -545,6 +555,8 @@ class RoutingManager:
             "presets": ["iran_banks"],
             "custom_cidrs": [],
             "custom_domains": [],
+            "geoip_enabled": False,
+            "geoip_countries": [],
             "max_routes": 250,
             "resolve_hours": 6,
             "resolved_ips": {},
@@ -630,6 +642,15 @@ class RoutingManager:
             for dom in self._collect_bypass_domains(cfg):
                 for ip in resolved_map.get(dom) or []:
                     raw.append(f"{ip}/32" if "/" not in str(ip) else str(ip))
+
+        # ✅ GeoIP: add all CIDRs for selected countries
+        if cfg.get("geoip_enabled") and self._geoip is not None:
+            for iso in cfg.get("geoip_countries") or []:
+                iso = str(iso).strip().upper()
+                if iso:
+                    geo_cidrs = self._geoip.country_cidrs(iso)
+                    raw.extend(geo_cidrs)
+
         valid, _bad = parse_cidr_list(raw)
         return valid
 
@@ -653,6 +674,10 @@ class RoutingManager:
                 k: {"label": v["label"], "domains_count": len(v["domains"]), "cidrs_count": len(v["cidrs"])}
                 for k, v in BYPASS_PRESETS.items()
             }
+            # GeoIP status
+            snap["geoip_available"] = self._geoip is not None
+            if self._geoip is not None:
+                snap["geoip_status"] = self._geoip.status()
             return snap
 
     def resolve_bypass_domains(
@@ -755,6 +780,17 @@ class RoutingManager:
                 else:
                     bad_doms.append(s)
 
+            # ✅ GeoIP countries
+            geoip_enabled = bool(payload.get("geoip_enabled", self.bypass.get("geoip_enabled", False)))
+            raw_countries = payload.get("geoip_countries", self.bypass.get("geoip_countries", []))
+            if isinstance(raw_countries, str):
+                raw_countries = re.split(r"[\s,]+", raw_countries.strip())
+            geoip_countries: list[str] = []
+            for c in raw_countries or []:
+                c = str(c).strip().upper()
+                if c and c.isalpha() and len(c) <= 10 and c not in geoip_countries:
+                    geoip_countries.append(c)
+
             try:
                 max_routes = max(1, min(500, int(payload.get("max_routes", self.bypass["max_routes"]))))
             except (TypeError, ValueError):
@@ -769,6 +805,8 @@ class RoutingManager:
                 presets=presets,
                 custom_cidrs=valid_cidrs,
                 custom_domains=valid_doms,
+                geoip_enabled=geoip_enabled,
+                geoip_countries=geoip_countries,
                 max_routes=max_routes,
                 resolve_hours=resolve_hours,
             )

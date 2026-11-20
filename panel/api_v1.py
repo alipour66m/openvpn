@@ -614,6 +614,37 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
         res = rt.save_bypass(body, resolve_now=resolve_now)
         return jsonify(ok=True, bypass=res)
 
+    @app.route("/api/v1/routing/geoip/status", methods=["GET"])
+    @api_auth
+    def api_v1_routing_geoip_status():
+        rt = deps["ROUTING"]
+        geoip = getattr(rt, "_geoip", None)
+        if geoip is None:
+            return jsonify(ok=True, available=False, msg="GeoIP not configured")
+        return jsonify(ok=True, available=True, status=geoip.status())
+
+    @app.route("/api/v1/routing/geoip/countries", methods=["GET"])
+    @api_auth
+    def api_v1_routing_geoip_countries():
+        rt = deps["ROUTING"]
+        geoip = getattr(rt, "_geoip", None)
+        if geoip is None:
+            return jsonify(ok=True, available=False, countries=[])
+        countries = geoip.available_countries()
+        return jsonify(ok=True, available=True, countries=countries)
+
+    @app.route("/api/v1/routing/geoip/refresh", methods=["POST"])
+    @api_auth
+    def api_v1_routing_geoip_refresh():
+        rt = deps["ROUTING"]
+        geoip = getattr(rt, "_geoip", None)
+        if geoip is None:
+            return jsonify(ok=False, error="GeoIP not configured"), 400
+        body = _json_body()
+        full = bool(body.get("full", False))
+        result = geoip.refresh(full=full)
+        return jsonify(ok=True, result=result, status=geoip.status())
+
     @app.route("/api/v1/routing/bypass/resolve", methods=["POST"])
     @api_auth
     def api_v1_routing_bypass_resolve():
