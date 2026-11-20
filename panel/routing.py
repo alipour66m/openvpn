@@ -315,6 +315,16 @@ def parse_cidr_list(items: Iterable[str]) -> tuple[list[str], list[str]]:
     return valid, invalid
 
 
+PLATFORM_ROUTE_CAPS: dict[str, int] = {
+    "ios":     200,   # iOS NetworkExtension hard limit is ~250; use 200 for safety margin
+    "android": 500,
+    "win":     500,
+    "mac":     500,
+    "linux":   500,
+    "default": 250,   # conservative safe default
+}
+
+
 def collapse_and_cap_cidrs(cidrs: Iterable[str], max_routes: int = 250) -> dict[str, Any]:
     """Collapse overlapping IPv4 networks and cap count to stay safe for iOS NetworkExtension."""
     cap = max(1, min(500, int(max_routes or 250)))
@@ -344,6 +354,86 @@ def collapse_and_cap_cidrs(cidrs: Iterable[str], max_routes: int = 250) -> dict[
         "total_before_cap": total,
         "pushed_count": len(routes),
         "truncated": total > cap,
+    }
+
+
+def build_prioritized_routes(
+    protected_cidrs: list[str],
+    geoip_cidrs: list[str],
+    cap: int = 250,
+) -> dict[str, Any]:
+    """Build a capped route list with Tier 1 always guaranteed.
+
+    Tier 1 — Protected (always pushed, max 60): CIDRs from BYPASS_PRESETS/resolved IPs.
+    Tier 2 — GeoIP core (broadest networks, /8→/19): fills remaining slots after tier1.
+    Tier 3 — GeoIP fine (smaller networks /20+): only included if cap allows.
+
+    Returns dict with:
+      routes: list of (ip, mask, cidr) tuples
+      tier1_count: int
+      tier2_count: int
+      tier3_count: int
+      total_before_cap: int
+      pushed_count: int
+      truncated: bool
+    """
+    cap = max(1, min(1000, int(cap or 250)))
+    TIER1_MAX = 60
+
+    def _parse_nets(raw_list: list[str]) -> list[ipaddress.IPv4Network]:
+        nets: list[ipaddress.IPv4Network] = []
+        for raw in raw_list:
+            try:
+                net = ipaddress.IPv4Network(str(raw).strip(), strict=False)
+            except ValueError:
+                continue
+            if (
+                net.prefixlen >= 8
+                and not net.is_loopback
+                and not net.is_multicast
+                and not net.is_link_local
+                and not net.is_unspecified
+                and not net.is_reserved
+            ):
+                nets.append(net)
+        return nets
+
+    # --- Tier 1: collapse protected CIDRs, cap at TIER1_MAX ---
+    t1_nets = list(ipaddress.collapse_addresses(_parse_nets(protected_cidrs)))
+    t1_nets.sort(key=lambda n: (n.prefixlen, int(n.network_address)))
+    t1_nets = t1_nets[:TIER1_MAX]
+
+    # --- Tier 2+3: collapse GeoIP CIDRs ---
+    geo_nets = list(ipaddress.collapse_addresses(_parse_nets(geoip_cidrs)))
+    # Tier 2: prefix /8 to /19 (broader); Tier 3: /20 and narrower
+    tier2_nets = sorted(
+        [n for n in geo_nets if n.prefixlen < 20],
+        key=lambda n: (n.prefixlen, int(n.network_address)),
+    )
+    tier3_nets = sorted(
+        [n for n in geo_nets if n.prefixlen >= 20],
+        key=lambda n: (n.prefixlen, int(n.network_address)),
+    )
+
+    total_before_cap = len(t1_nets) + len(tier2_nets) + len(tier3_nets)
+
+    # Fill remaining slots after tier1
+    remaining = max(0, cap - len(t1_nets))
+    tier2_used = tier2_nets[:remaining]
+    remaining -= len(tier2_used)
+    tier3_used = tier3_nets[:remaining]
+
+    all_nets = t1_nets + tier2_used + tier3_used
+    routes = [(str(n.network_address), str(n.netmask), str(n)) for n in all_nets]
+
+    return {
+        "routes": routes,
+        "tier1_count": len(t1_nets),
+        "tier2_count": len(tier2_used),
+        "tier3_count": len(tier3_used),
+        "total_before_cap": total_before_cap,
+        "pushed_count": len(routes),
+        "truncated": total_before_cap > cap,
     }
 
 
@@ -654,6 +744,36 @@ class RoutingManager:
         valid, _bad = parse_cidr_list(raw)
         return valid
 
+    def _collect_bypass_cidrs_split(self, cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
+        """Collect bypass CIDRs split into (protected_tier1, geoip_tier2) lists.
+
+        protected_tier1: preset static CIDRs + resolved IPs + custom CIDRs.
+        geoip_tier2: CIDRs from GeoIP countries.
+        """
+        tier1_raw: list[str] = []
+        for key in cfg.get("presets") or []:
+            preset = BYPASS_PRESETS.get(key)
+            if preset:
+                tier1_raw.extend(preset.get("cidrs") or [])
+        tier1_raw.extend(cfg.get("custom_cidrs") or [])
+        resolved_map = cfg.get("resolved_ips") or {}
+        if isinstance(resolved_map, dict):
+            for dom in self._collect_bypass_domains(cfg):
+                for ip in resolved_map.get(dom) or []:
+                    tier1_raw.append(f"{ip}/32" if "/" not in str(ip) else str(ip))
+
+        tier2_raw: list[str] = []
+        if cfg.get("geoip_enabled") and self._geoip is not None:
+            for iso in cfg.get("geoip_countries") or []:
+                iso = str(iso).strip().upper()
+                if iso:
+                    geo_cidrs = self._geoip.country_cidrs(iso)
+                    tier2_raw.extend(geo_cidrs)
+
+        tier1_valid, _ = parse_cidr_list(tier1_raw)
+        tier2_valid, _ = parse_cidr_list(tier2_raw)
+        return tier1_valid, tier2_valid
+
     def compute_bypass_routes(self, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         with self.lock:
             target = cfg if cfg is not None else self.bypass
@@ -661,6 +781,28 @@ class RoutingManager:
                 return {"routes": [], "total_before_cap": 0, "pushed_count": 0, "truncated": False}
             cidrs = self._collect_bypass_cidrs(target)
             return collapse_and_cap_cidrs(cidrs, int(target.get("max_routes") or 250))
+
+    def compute_bypass_routes_for_platform(self, platform: str, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Like compute_bypass_routes but respects per-platform caps.
+
+        Uses build_prioritized_routes() to guarantee tier1 (preset) routes are
+        always included, then fills remaining slots with GeoIP routes.
+        """
+        with self.lock:
+            target = cfg if cfg is not None else self.bypass
+            if not target.get("enabled"):
+                return {
+                    "routes": [], "tier1_count": 0, "tier2_count": 0, "tier3_count": 0,
+                    "total_before_cap": 0, "pushed_count": 0, "truncated": False,
+                    "platform": platform, "cap": PLATFORM_ROUTE_CAPS.get(platform, PLATFORM_ROUTE_CAPS["default"]),
+                }
+            plat_key = str(platform or "default").strip().lower()
+            cap = PLATFORM_ROUTE_CAPS.get(plat_key, PLATFORM_ROUTE_CAPS["default"])
+            tier1, tier2 = self._collect_bypass_cidrs_split(target)
+            result = build_prioritized_routes(tier1, tier2, cap=cap)
+            result["platform"] = plat_key
+            result["cap"] = cap
+            return result
 
     def get_bypass(self) -> dict[str, Any]:
         with self.lock:
@@ -674,6 +816,15 @@ class RoutingManager:
                 k: {"label": v["label"], "domains_count": len(v["domains"]), "cidrs_count": len(v["cidrs"])}
                 for k, v in BYPASS_PRESETS.items()
             }
+            # Platform caps and tier1 count
+            snap["platform_caps"] = dict(PLATFORM_ROUTE_CAPS)
+            t1, _t2 = self._collect_bypass_cidrs_split(snap)
+            import ipaddress as _ip
+            t1_collapsed = list(_ip.collapse_addresses(
+                n for raw in t1
+                for n in [_ip.IPv4Network(raw, strict=False)]
+            ))
+            snap["tier1_protected_count"] = min(len(t1_collapsed), 60)
             # GeoIP status
             snap["geoip_available"] = self._geoip is not None
             if self._geoip is not None:
@@ -837,8 +988,31 @@ class RoutingManager:
         except OSError:
             txt = ""
 
-        summary = self.compute_bypass_routes()
-        bypass_block = render_bypass_block(summary["routes"])
+        # Use prioritized route building with max platform cap (500) for the static CCD.
+        # The client-connect script will truncate to per-platform cap at connection time.
+        with self.lock:
+            target = self.bypass
+            if target.get("enabled"):
+                static_cap = max(PLATFORM_ROUTE_CAPS.values())  # 500
+                tier1, tier2 = self._collect_bypass_cidrs_split(target)
+                priority_result = build_prioritized_routes(tier1, tier2, cap=static_cap)
+                routes = priority_result["routes"]
+                tier1_count = priority_result["tier1_count"]
+            else:
+                routes = []
+                tier1_count = 0
+
+        if routes:
+            # Embed tier1_count in the bypass block header comment so client-connect can find it
+            items = list(routes)
+            lines = [BYPASS_BEGIN, f"# tier1_count={tier1_count}"]
+            for ip, mask, _cidr in items:
+                lines.append(f'push "route {ip} {mask} net_gateway"')
+            lines.append(BYPASS_END)
+            bypass_block = "\n".join(lines) + "\n"
+        else:
+            bypass_block = ""
+
         txt = patch_marked_block(txt, BYPASS_BEGIN, BYPASS_END, bypass_block)
 
         if user_dns is not None:
@@ -861,6 +1035,94 @@ class RoutingManager:
                 self.sync_user_ccd(name, u.get("dns") or [])
                 count += 1
         return count
+
+    def render_client_connect_script(self) -> str:
+        """Generate a bash client-connect script that handles per-platform route caps.
+
+        The script:
+        1. Reads $IV_PLAT env var (set by OpenVPN on client connect)
+        2. Chooses the right route cap based on platform
+        3. For iOS: truncates the static CCD to MAX_ROUTES, keeping tier1 first
+        4. For other platforms: copies the static CCD as-is (already capped at 500)
+
+        The script is written to {server_dir}/gasslight-client-connect.sh.
+        OpenVPN server config needs:
+            script-security 2
+            client-connect /path/to/gasslight-client-connect.sh
+        """
+        # CCD base: each user has their CCD at {server_dir}/ccd-{name}/{name}
+        # In the bash script we infer the user CCD path from $common_name
+        script_path = os.path.join(self.server_dir, "gasslight-client-connect.sh")
+        ccd_base = self.server_dir
+
+        caps_lines: list[str] = []
+        for plat, cap in PLATFORM_ROUTE_CAPS.items():
+            if plat == "default":
+                caps_lines.append(f"  *)       MAX_ROUTES={cap} ;;")
+            else:
+                caps_lines.append(f"  {plat})     MAX_ROUTES={cap} ;;")
+
+        caps_block = "\n".join(caps_lines)
+
+        script = f"""\
+#!/bin/sh
+# GassLight client-connect: platform-aware route injection
+# Called by OpenVPN with $1 = temp config file, $IV_PLAT = client platform
+# OpenVPN server.conf must have:
+#   script-security 2
+#   client-connect /path/to/gasslight-client-connect.sh
+
+PLATFORM="${{IV_PLAT:-default}}"
+CCD_BASE="{ccd_base}"
+USER_NAME="${{common_name}}"
+
+# Platform caps
+case "$PLATFORM" in
+{caps_block}
+esac
+
+# Locate the user's static CCD (pre-generated by panel with cap=500)
+CCD_FILE="$CCD_BASE/ccd-$USER_NAME/$USER_NAME"
+if [ ! -f "$CCD_FILE" ]; then
+    exit 0
+fi
+
+# Count bypass routes in CCD
+ROUTE_COUNT=$(grep -c 'push "route' "$CCD_FILE" 2>/dev/null || echo 0)
+
+if [ "$ROUTE_COUNT" -le "$MAX_ROUTES" ]; then
+    # Static CCD is within platform limit -> append as-is
+    cat "$CCD_FILE" >> "$1"
+    exit 0
+fi
+
+# Static CCD exceeds platform limit -> truncate, keeping tier1 first
+# Extract tier1_count from embedded comment (# tier1_count=N)
+TIER1_COUNT=$(grep -m1 '# tier1_count=' "$CCD_FILE" | sed 's/.*tier1_count=//' | tr -d '[:space:]')
+if [ -z "$TIER1_COUNT" ] || ! echo "$TIER1_COUNT" | grep -qE '^[0-9]+$'; then
+    TIER1_COUNT=0
+fi
+
+# Non-route lines (config, DNS, comments): always include
+grep -v 'push "route' "$CCD_FILE" >> "$1"
+
+# Tier 1 routes (first TIER1_COUNT route lines): always included
+grep 'push "route' "$CCD_FILE" | head -n "$TIER1_COUNT" >> "$1"
+
+# Remaining slots for tier2/3 routes
+REMAINING=$(( MAX_ROUTES - TIER1_COUNT ))
+if [ "$REMAINING" -gt 0 ]; then
+    grep 'push "route' "$CCD_FILE" | tail -n +"$(( TIER1_COUNT + 1 ))" | head -n "$REMAINING" >> "$1"
+fi
+
+exit 0
+"""
+        tmp = script_path + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(script)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, script_path)
+        return script_path
 
     def bypass_resolver_loop(self) -> None:
         while True:

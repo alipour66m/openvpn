@@ -614,6 +614,29 @@ def register_api_v1(app: Any, deps: dict[str, Any]) -> None:
         res = rt.save_bypass(body, resolve_now=resolve_now)
         return jsonify(ok=True, bypass=res)
 
+    @app.route("/api/v1/routing/bypass/preview", methods=["GET"])
+    @api_auth
+    def api_v1_routing_bypass_preview():
+        rt = deps["ROUTING"]
+        from panel.routing import PLATFORM_ROUTE_CAPS
+        platform = str(request.args.get("platform") or "default").strip().lower()
+        if platform not in PLATFORM_ROUTE_CAPS:
+            platform = "default"
+        result = rt.compute_bypass_routes_for_platform(platform)
+        return jsonify(
+            ok=True,
+            platform=platform,
+            cap=result.get("cap"),
+            pushed_count=result.get("pushed_count"),
+            tier1_count=result.get("tier1_count"),
+            tier2_count=result.get("tier2_count"),
+            tier3_count=result.get("tier3_count", 0),
+            total_before_cap=result.get("total_before_cap"),
+            truncated=result.get("truncated"),
+            routes=[r[2] for r in result.get("routes", [])],
+            platform_caps=PLATFORM_ROUTE_CAPS,
+        )
+
     @app.route("/api/v1/routing/geoip/status", methods=["GET"])
     @api_auth
     def api_v1_routing_geoip_status():

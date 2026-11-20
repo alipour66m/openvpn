@@ -15,7 +15,9 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from panel.routing import (  # noqa: E402
+    PLATFORM_ROUTE_CAPS,
     RoutingManager,
+    build_prioritized_routes,
     collapse_and_cap_cidrs,
     conf_with_max_clients,
     domain_matches,
@@ -385,6 +387,217 @@ class RoutingManagerTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlatformRouteTestCase(unittest.TestCase):
+    """Tests for platform-aware route tiers and client-connect script generation."""
+
+    class MockGeoIP:
+        COUNTRY_DATA: dict[str, list[str]] = {
+            "IR": [f"{10 + i}.100.1.0/24" for i in range(60)] + ["78.39.0.0/16", "194.225.0.0/16"],
+            "NL": ["145.220.0.0/16", "185.86.148.0/22"],
+        }
+
+        def country_cidrs(self, iso: str) -> list[str]:
+            return list(self.COUNTRY_DATA.get(iso.upper(), []))
+
+        def available_countries(self) -> list[str]:
+            return sorted(self.COUNTRY_DATA.keys())
+
+        def status(self) -> dict:
+            return {"mmdb_lite_loaded": True, "ir_networks": len(self.COUNTRY_DATA["IR"])}
+
+    def _make_rm(self, geoip=None) -> RoutingManager:
+        tmpdir = tempfile.mkdtemp()
+        os.makedirs(os.path.join(tmpdir, "srv"), exist_ok=True)
+        return RoutingManager(
+            base_dir=tmpdir,
+            server_dir=os.path.join(tmpdir, "srv"),
+            run_fn=lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),
+            load_state_fn=lambda: {"users": []},
+            set_dns_fn=lambda x: (True, ""),
+            read_dns_fn=lambda: [],
+            restart_for_dns_fn=lambda: None,
+            proxy_sync_fn=lambda: None,
+            geoip=geoip,
+        )
+
+    # ------------------------------------------------------------------ PLATFORM_ROUTE_CAPS
+
+    def test_platform_caps_constants(self) -> None:
+        """PLATFORM_ROUTE_CAPS must have required keys and iOS must be the most restrictive."""
+        for key in ("ios", "android", "win", "mac", "linux", "default"):
+            self.assertIn(key, PLATFORM_ROUTE_CAPS, f"Missing key: {key}")
+        self.assertLessEqual(PLATFORM_ROUTE_CAPS["ios"], PLATFORM_ROUTE_CAPS["android"])
+        self.assertLessEqual(PLATFORM_ROUTE_CAPS["ios"], PLATFORM_ROUTE_CAPS["win"])
+        self.assertLessEqual(PLATFORM_ROUTE_CAPS["ios"], PLATFORM_ROUTE_CAPS["default"])
+
+    # ------------------------------------------------------------------ build_prioritized_routes
+
+    def test_build_prioritized_routes_tier1_always_wins(self) -> None:
+        """Tier 1 routes must always be included even when cap is very small.
+        Use non-overlapping /24 CIDRs to prevent collapse_addresses from merging them.
+        """
+        # 10 non-overlapping /24 protected nets (different /8 so they don't collapse)
+        protected = [f"{10 + i}.100.1.0/24" for i in range(10)]
+        geoip = [f"172.{i}.0.0/16" for i in range(16, 32)]  # 16 geoip /16 nets
+        result = build_prioritized_routes(protected, geoip, cap=15)
+        self.assertEqual(result["tier1_count"], 10, f"routes={result['routes']}")
+        self.assertGreaterEqual(result["pushed_count"], 10)
+        self.assertLessEqual(result["pushed_count"], 15)
+        # All 10 protected CIDRs must appear in the first routes
+        t1_cidrs = {cidr for _ip, _mask, cidr in result["routes"][:10]}
+        for i in range(10):
+            expected = f"{10 + i}.100.1.0/24"
+            self.assertIn(expected, t1_cidrs, f"Expected tier1 route {expected}")
+
+    def test_build_prioritized_routes_cap_respected(self) -> None:
+        """Total pushed_count must never exceed cap."""
+        protected = [f"5.{i}.0.0/16" for i in range(5)]
+        geoip = [f"10.{i}.0.0/24" for i in range(300)]
+        for cap in (50, 200, 500):
+            result = build_prioritized_routes(protected, geoip, cap=cap)
+            self.assertLessEqual(result["pushed_count"], cap, f"cap={cap}")
+
+    def test_build_prioritized_routes_tier1_max_60(self) -> None:
+        """Tier 1 must be capped at 60 even if more protected CIDRs are supplied."""
+        protected = [f"{10 + i}.0.0.0/8" for i in range(100)]   # 100 entries but /8 each
+        # After collapse, many of these are unique /8 networks -> still capped at 60
+        result = build_prioritized_routes(protected, [], cap=500)
+        self.assertLessEqual(result["tier1_count"], 60)
+
+    def test_build_prioritized_routes_no_geoip(self) -> None:
+        """With no GeoIP CIDRs, result must equal collapse_and_cap_cidrs output."""
+        protected = ["5.200.0.0/24", "5.200.1.0/24"]
+        result = build_prioritized_routes(protected, [], cap=250)
+        old = collapse_and_cap_cidrs(protected, max_routes=250)
+        # Both should collapse to the same single /23
+        self.assertEqual(result["pushed_count"], old["pushed_count"])
+        self.assertEqual(result["routes"], old["routes"])
+
+    def test_build_prioritized_routes_tier2_tier3_split(self) -> None:
+        """Tier2 (/8-/19) must be preferred over tier3 (/20+) when cap is tight."""
+        protected: list[str] = []
+        # Mix of broad and narrow networks
+        broad = ["20.0.0.0/12", "21.0.0.0/16", "22.0.0.0/18"]   # tier2
+        narrow = [f"30.{i}.0.0/22" for i in range(50)]            # tier3
+        geoip = broad + narrow
+        result = build_prioritized_routes(protected, geoip, cap=5)
+        # With cap=5 and no tier1, all 5 slots should go to tier2 broad routes first
+        self.assertEqual(result["tier2_count"], min(len(broad), 5))
+
+    def test_build_prioritized_routes_truncated_flag(self) -> None:
+        """truncated must be True when total_before_cap exceeds cap."""
+        protected = [f"5.{i}.0.0/16" for i in range(5)]
+        geoip = [f"10.{i}.0.0/24" for i in range(300)]
+        result = build_prioritized_routes(protected, geoip, cap=50)
+        self.assertTrue(result["truncated"])
+        self.assertGreater(result["total_before_cap"], 50)
+
+    def test_build_prioritized_routes_no_truncation(self) -> None:
+        """truncated must be False when everything fits within cap."""
+        protected = ["5.1.0.0/16"]
+        geoip = ["10.1.0.0/24", "10.2.0.0/24"]
+        result = build_prioritized_routes(protected, geoip, cap=500)
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["pushed_count"], result["total_before_cap"])
+
+    # ------------------------------------------------------------------ compute_bypass_routes_for_platform
+
+    def test_compute_bypass_routes_for_platform_ios_cap(self) -> None:
+        """iOS platform must cap at PLATFORM_ROUTE_CAPS['ios']."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        rm.save_bypass(
+            {"enabled": True, "geoip_enabled": True, "geoip_countries": ["IR"], "presets": []},
+            resolve_now=False,
+        )
+        result = rm.compute_bypass_routes_for_platform("ios")
+        self.assertEqual(result["platform"], "ios")
+        self.assertEqual(result["cap"], PLATFORM_ROUTE_CAPS["ios"])
+        self.assertLessEqual(result["pushed_count"], PLATFORM_ROUTE_CAPS["ios"])
+
+    def test_compute_bypass_routes_for_platform_android_cap(self) -> None:
+        """Android platform must cap at PLATFORM_ROUTE_CAPS['android']."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        rm.save_bypass(
+            {"enabled": True, "geoip_enabled": True, "geoip_countries": ["IR"], "presets": []},
+            resolve_now=False,
+        )
+        result = rm.compute_bypass_routes_for_platform("android")
+        self.assertEqual(result["cap"], PLATFORM_ROUTE_CAPS["android"])
+
+    def test_compute_bypass_routes_for_platform_unknown_uses_default(self) -> None:
+        """Unknown platform must fall back to 'default' cap."""
+        rm = self._make_rm(geoip=self.MockGeoIP())
+        rm.save_bypass({"enabled": True, "geoip_enabled": False, "presets": []}, resolve_now=False)
+        result = rm.compute_bypass_routes_for_platform("haiku_os")
+        self.assertEqual(result["cap"], PLATFORM_ROUTE_CAPS["default"])
+
+    def test_compute_bypass_routes_for_platform_disabled(self) -> None:
+        """When bypass is disabled, platform method must return empty routes."""
+        rm = self._make_rm()
+        result = rm.compute_bypass_routes_for_platform("ios")
+        self.assertEqual(result["pushed_count"], 0)
+        self.assertEqual(result["routes"], [])
+
+    # ------------------------------------------------------------------ sync_user_ccd tier1 annotation
+
+    def test_sync_user_ccd_embeds_tier1_count(self) -> None:
+        """Static CCD must contain '# tier1_count=N' annotation in bypass block."""
+        tmpdir = tempfile.mkdtemp()
+        sdir = os.path.join(tmpdir, "srv")
+        os.makedirs(os.path.join(sdir, "ccd-ali"), exist_ok=True)
+        rm = RoutingManager(
+            base_dir=os.path.join(tmpdir, "panel"),
+            server_dir=sdir,
+            run_fn=lambda *a, **kw: type("R", (), {"returncode": 0, "stdout": ""})(),
+            load_state_fn=lambda: {"users": [{"name": "ali", "id": 1, "port": 2222, "subnet": "10.101.0", "proto": "tcp"}]},
+            set_dns_fn=lambda x: (True, ""),
+            read_dns_fn=lambda: [],
+            restart_for_dns_fn=lambda: None,
+            proxy_sync_fn=lambda: None,
+        )
+        rm.save_bypass(
+            {"enabled": True, "custom_cidrs": ["5.200.0.0/24", "5.201.0.0/24"], "presets": []},
+            resolve_now=False,
+        )
+        ccd_txt = open(os.path.join(sdir, "ccd-ali", "ali"), encoding="utf-8").read()
+        self.assertIn("# tier1_count=", ccd_txt)
+
+    # ------------------------------------------------------------------ render_client_connect_script
+
+    def test_render_client_connect_script_creates_file(self) -> None:
+        """render_client_connect_script must create an executable .sh file."""
+        rm = self._make_rm()
+        script_path = rm.render_client_connect_script()
+        self.assertTrue(os.path.isfile(script_path), "Script file not created")
+        content = open(script_path, encoding="utf-8").read()
+        # Must start with shebang
+        self.assertTrue(content.startswith("#!/bin/sh"), "Missing shebang")
+        # Must have all platform cases
+        for plat in ("ios", "android", "win"):
+            self.assertIn(plat, content)
+        # Must reference CCD_BASE path
+        self.assertIn(rm.server_dir, content)
+
+    def test_render_client_connect_script_ios_max_routes(self) -> None:
+        """Script must set MAX_ROUTES=200 for ios case."""
+        rm = self._make_rm()
+        rm.render_client_connect_script()
+        script_path = os.path.join(rm.server_dir, "gasslight-client-connect.sh")
+        content = open(script_path, encoding="utf-8").read()
+        self.assertIn(f"MAX_ROUTES={PLATFORM_ROUTE_CAPS['ios']}", content)
+
+    # ------------------------------------------------------------------ get_bypass platform info
+
+    def test_get_bypass_includes_platform_caps(self) -> None:
+        """get_bypass() must include platform_caps and tier1_protected_count."""
+        rm = self._make_rm()
+        snap = rm.get_bypass()
+        self.assertIn("platform_caps", snap)
+        self.assertIn("ios", snap["platform_caps"])
+        self.assertIn("tier1_protected_count", snap)
+        self.assertIsInstance(snap["tier1_protected_count"], int)
 
 
 class GeoIPTestCase(unittest.TestCase):
