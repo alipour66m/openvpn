@@ -539,6 +539,20 @@ TR["en"].update({
  "rt_bp_cidrs": "Custom IPs / CIDRs (one per line)", "rt_bp_doms": "Custom direct bypass domains (one per line)",
  "rt_bp_max": "Max routes cap (iOS safe max 250)", "rt_bp_hours": "Auto DNS refresh interval (hours)",
  "rt_bp_resolve": "Resolve Domains Now", "rt_bp_stats": "{n} routes pushed (last DNS refresh: {ts})",
+  "rt_bp_geoip_title": "GeoIP Country Bypass (MaxMind / Chocolate4U)",
+  "rt_bp_geoip_desc": "Bypass entire countries directly — all their IP ranges are pushed as net_gateway routes. Uses Country-lite.mmdb (IR only, 127 KB) or Country.mmdb (all countries).",
+  "rt_bp_geoip_enable": "Enable GeoIP country bypass",
+  "rt_bp_geoip_countries": "Countries to bypass (ISO codes, e.g. IR)",
+  "rt_bp_geoip_status": "GeoIP status",
+  "rt_bp_geoip_refresh": "Refresh GeoIP database",
+  "rt_bp_platform_caps": "Platform route limits",
+  "rt_bp_geoip_title": "GeoIP Country Bypass (MaxMind / Chocolate4U)",
+  "rt_bp_geoip_desc": "Bypass entire countries directly — all their IP ranges are pushed as net_gateway routes. Uses Country-lite.mmdb (IR only, 127 KB) or Country.mmdb (all countries).",
+  "rt_bp_geoip_enable": "Enable GeoIP country bypass",
+  "rt_bp_geoip_countries": "Countries to bypass (ISO codes, e.g. IR)",
+  "rt_bp_geoip_status": "GeoIP status",
+  "rt_bp_geoip_refresh": "Refresh GeoIP database",
+  "rt_bp_platform_caps": "Platform route limits",
  "rt_sm_title": "Smart Server-Side Domain/SNI Routing & WARP", "rt_sm_desc": "Peek TLS SNI & HTTP Host so ONLY selected domains (AI, Streaming, Custom) exit via WARP / Exit Server / Proxy while all other traffic goes direct at full speed.",
  "rt_sm_enable": "Enable smart domain routing", "rt_sm_mode": "Routing mode",
  "rt_sm_m_dom": "Selected domains only (AI / Streaming / Custom)", "rt_sm_m_all": "All traffic (matching ports)",
@@ -579,6 +593,13 @@ TR["fa"].update({
  "rt_bp_cidrs": "رنج IP یا CIDR دلخواه (هر خط یکی)", "rt_bp_doms": "دامنه‌های دلخواه برای اتصال مستقیم (هر خط یکی)",
  "rt_bp_max": "سقف تعداد Route (برای پایداری iOS حداکثر ۲۵۰)", "rt_bp_hours": "بازه بروزرسانی خودکار DNS دامنه‌ها (ساعت)",
  "rt_bp_resolve": "بروزرسانی فوری IP دامنه‌ها", "rt_bp_stats": "{n} مسیر فعال (آخرین بروزرسانی: {ts})",
+  "rt_bp_geoip_title": "بایپس کشور با GeoIP (MaxMind / Chocolate4U)",
+  "rt_bp_geoip_desc": "بایپس مستقیم کل یک کشور — تمام رنج‌های IP آن کشور به عنوان مسیر مستقیم ارسال می‌شوند. از Country-lite.mmdb (فقط IR، ۱۲۷KB) یا Country.mmdb (همه کشورها) استفاده می‌کند.",
+  "rt_bp_geoip_enable": "فعال‌سازی بایپس GeoIP کشور",
+  "rt_bp_geoip_countries": "کشورهای بایپس (کد ISO مثل IR)",
+  "rt_bp_geoip_status": "وضعیت GeoIP",
+  "rt_bp_geoip_refresh": "بروزرسانی پایگاه‌داده GeoIP",
+  "rt_bp_platform_caps": "محدودیت مسیر هر پلتفرم",
  "rt_sm_title": "مسیریابی هوشمند دامنه‌ها (TLS SNI) و WARP", "rt_sm_desc": "بررسی هوشمند دامنه مقصد تا فقط سایت‌های منتخب (هوش مصنوعی، استریم یا دلخواه) از سرور خروجی/WARP رد شوند و بقیه با سرعت کامل مستقیم بروند.",
  "rt_sm_enable": "فعال‌سازی مسیریابی هوشمند دامنه", "rt_sm_mode": "حالت مسیریابی",
  "rt_sm_m_dom": "فقط دامنه‌های منتخب (هوش مصنوعی / استریم / دلخواه)", "rt_sm_m_all": "کل ترافیک پورت‌های منتخب",
@@ -3385,6 +3406,8 @@ def adv_rt_bypass():
         "custom_domains": f.get("custom_domains", ""),
         "max_routes": f.get("max_routes") or 250,
         "resolve_hours": f.get("resolve_hours") or 6,
+        "geoip_enabled": "geoip_enabled" in f,
+        "geoip_countries": [c.strip().upper() for c in re.split(r"[\s,]+", f.get("geoip_countries", "")) if c.strip()],
     }, resolve_now=(f.get("enabled") == "1"))
     flash(tr("f_rt_saved") + f" ({res['route_count']} routes)", "ok")
     return redirect(url_for("adv_pg_routing"))
@@ -5043,13 +5066,35 @@ ADV_RT_HTML = """
 <div><label>{{ t('rt_bp_max') }}</label><input name="max_routes" type="number" min="1" max="500" value="{{ rt_bp.max_routes }}"></div>
 <div><label>{{ t('rt_bp_hours') }}</label><input name="resolve_hours" type="number" min="1" max="168" value="{{ rt_bp.resolve_hours }}"></div>
 </div>
+<hr style="border-color:var(--border);margin:10px 0">
+<div><h4 style="margin:0 0 6px">{{ ic('globe',16) }} {{ t('rt_bp_geoip_title') }}</h4>
+<p class="muted" style="margin:0 0 8px;font-size:.85em">{{ t('rt_bp_geoip_desc') }}</p>
+{% if rt_bp.geoip_available %}
+<span class="pill on" style="margin-bottom:8px;display:inline-block">{{ ic('check',12) }} GeoIP: {{ rt_bp.geoip_status.source }} &mdash; {{ rt_bp.geoip_status.ir_networks }} IR networks</span>
+{% else %}
+<span class="pill" style="margin-bottom:8px;display:inline-block">{{ ic('alert-circle',12) }} GeoIP not loaded</span>
+{% endif %}
+<label class="chk"><input type="checkbox" name="geoip_enabled" value="1" {% if rt_bp.geoip_enabled %}checked{% endif %} {% if not rt_bp.geoip_available %}disabled{% endif %}><span>{{ t('rt_bp_geoip_enable') }}</span></label>
+<div><label>{{ t('rt_bp_geoip_countries') }}</label><input name="geoip_countries" class="mono" style="direction:ltr" placeholder="IR" value="{{ (rt_bp.geoip_countries or [])|join(' ') }}" {% if not rt_bp.geoip_available %}disabled{% endif %}></div>
+</div>
 <div class="row">
 <button class="btn">{{ ic('check',16) }} {{ t('px_save') }}</button>
 </div></form>
-<form method="post" action="{{ url_for('adv_rt_bypass_resolve') }}" style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+<form method="post" action="{{ url_for('adv_rt_bypass_resolve') }}">
 <button class="btn ghost sm">{{ ic('refresh',14) }} {{ t('rt_bp_resolve') }}</button>
-<span class="tag">{{ rt_bp.route_count }} routes{% if rt_bp.truncated %} (capped){% endif %}</span>
 </form>
+<form method="post" action="/api/v1/routing/geoip/refresh" style="display:inline">
+<button class="btn ghost sm" type="button" onclick="fetch('/api/v1/routing/geoip/refresh',{method:'POST',headers:{'X-API-Key':window._apiKey||''}}).then(r=>r.json()).then(d=>alert(d.ok?'GeoIP refreshed: '+d.status.ir_networks+' IR networks':'Error: '+d.error))">{{ ic('download',14) }} {{ t('rt_bp_geoip_refresh') }}</button>
+</form>
+<span class="tag">{{ rt_bp.route_count }} routes{% if rt_bp.truncated %} (capped){% endif %}</span>
+</div>
+<div style="margin-top:10px;padding:8px 12px;background:var(--bg2);border-radius:6px;font-size:.82em">
+<strong>{{ t('rt_bp_platform_caps') }}:</strong>
+<span style="margin-left:12px">iOS: 200</span>
+<span style="margin-left:12px">Android/Win/Mac: 500</span>
+<span style="margin-left:12px">Default: 250</span>
+</div>
 </div>
 
 <div class="card pxx" style="margin-top:18px"><h3>{{ ic('sliders') }} {{ t('rt_sm_title') }}</h3>
