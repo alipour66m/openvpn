@@ -32,10 +32,23 @@ trap 'printf "\n%serror:%s اسکریپت در خط %s متوقف شد.\n" "$C_R
 # ------------------------------------------------------------- پیش‌نیازها ---
 (( EUID == 0 )) || die "لطفاً با root اجرا کنید:  sudo bash update.sh"
 command -v python3 >/dev/null 2>&1 || die "python3 پیدا نشد"
-command -v pip3    >/dev/null 2>&1 || die "pip3 پیدا نشد"
 command -v git     >/dev/null 2>&1 || die "git پیدا نشد"
 command -v curl    >/dev/null 2>&1 || die "curl پیدا نشد"
 command -v systemctl >/dev/null 2>&1 || die "systemctl پیدا نشد (Ubuntu/Debian لازم است)"
+
+# نصب pip3 اگر موجود نیست
+if ! command -v pip3 >/dev/null 2>&1; then
+    say "pip3 پیدا نشد — نصب می‌شود..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y -qq python3-pip python3-venv 2>/dev/null
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y python3-pip 2>/dev/null
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y python3-pip 2>/dev/null
+    fi
+    command -v pip3 >/dev/null 2>&1 || die "نصب pip3 ناموفق بود — دستی نصب کنید: apt install python3-pip"
+    ok "pip3 نصب شد"
+fi
 
 # -------------------------------------------------------------- مسیرها ------
 PANEL_DIR="${PANEL_DIR:-/opt/ovpn-panel}"
@@ -101,7 +114,17 @@ else
     warn "محیط مجازی پیدا نشد، از pip3 سیستم استفاده می‌شود"
 fi
 
-"$PIP" install --quiet --upgrade \
+# نصب پکیج‌ها (سازگار با Ubuntu 22/24 و سیستم‌های جدید)
+PIP_OPTS="--quiet --upgrade"
+# Ubuntu 23+ و Debian 12+ نیاز به --break-system-packages دارند
+if "$PIP" install --help 2>&1 | grep -q "break-system-packages"; then
+    if [[ -z "$VENV" ]]; then
+        PIP_OPTS="$PIP_OPTS --break-system-packages"
+    fi
+fi
+
+# shellcheck disable=SC2086
+"$PIP" install $PIP_OPTS \
     maxminddb \
     flask \
     markupsafe \
