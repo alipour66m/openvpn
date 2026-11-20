@@ -75,6 +75,12 @@ else
             for f in update.sh install.sh; do
                 [[ -f "$SRC_DIR/$f" ]] && cp "$SRC_DIR/$f" "$PANEL_DIR/"
             done
+            # مهم: panel.py اصلی (که systemd از آن استفاده می‌کند) را هم آپدیت کن
+            # ExecStart=/usr/bin/python3 /opt/ovpn-panel/panel.py
+            if [[ -f "$SRC_DIR/panel/panel.py" ]]; then
+                cp "$SRC_DIR/panel/panel.py" "$PANEL_DIR/panel.py"
+                ok "  panel.py اصلی آپدیت شد"
+            fi
             NEW_COMMIT=$(curl -fsSL --max-time 10 \
                 "https://api.github.com/repos/${REPO}/commits/${REF}" 2>/dev/null \
                 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['sha'][:7])" \
