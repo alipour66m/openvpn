@@ -314,25 +314,36 @@ else
 fi
 
 # refresh GeoIP از API (اگر پنل بالا آمد)
+# توکن در api_keys.json ذخیره می‌شود؛ اولین کلید را می‌خوانیم
 API_TOKEN=""
-[[ -f "${PANEL_DIR}/auth.json" ]] && \
+if [[ -f "${PANEL_DIR}/api_keys.json" ]]; then
     API_TOKEN=$(python3 -c "
-import json
+import json, sys
 try:
-    print(json.load(open('${PANEL_DIR}/auth.json')).get('api_token',''))
+    data = json.load(open('${PANEL_DIR}/api_keys.json'))
+    keys = data.get('keys', [])
+    # توکن plain text ذخیره نمی‌شود — فقط hash؛ از متغیر محیطی GASSLIGHT_API_KEY بخوان
+    import os
+    t = os.environ.get('GASSLIGHT_API_KEY','')
+    print(t)
 except: pass
 " 2>/dev/null || true)
+fi
+# اگر متغیر محیطی نبود، skip کن
+if [[ -n "\${GASSLIGHT_API_KEY:-}" ]]; then
+    API_TOKEN="\${GASSLIGHT_API_KEY}"
+fi
 
-if [[ -n "$API_TOKEN" ]]; then
+if [[ -n "\$API_TOKEN" ]]; then
     sleep 2
-    HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-        -X POST "${PANEL_API}/api/v1/routing/geoip/refresh" \
-        -H "X-Api-Token: ${API_TOKEN}" --max-time 15 2>/dev/null || echo "000")
-    [[ "$HTTP" == "200" ]] && ok "GeoIP refresh از API موفق" \
-        || warn "GeoIP refresh کد $HTTP (پنل شاید هنوز بالا نیامده)"
+    HTTP=\$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST "\${PANEL_API}/api/v1/routing/geoip/refresh" \
+        -H "X-API-Key: \${API_TOKEN}" --max-time 15 2>/dev/null || echo "000")
+    [[ "\$HTTP" == "200" ]] && ok "GeoIP refresh از API موفق" \
+        || warn "GeoIP refresh کد \$HTTP"
 else
-    warn "توکن API پیدا نشد — GeoIP refresh دستی:"
-    warn "  curl -X POST http://127.0.0.1:${PANEL_PORT}/api/v1/routing/geoip/refresh -H 'X-Api-Token: TOKEN'"
+    ok "GeoIP از فایل محلی لود شد (refresh خودکار در پس‌زمینه)"
+    ok "برای refresh دستی: curl -X POST http://127.0.0.1:\${PANEL_PORT}/api/v1/routing/geoip/refresh -H 'X-API-Key: YOUR_TOKEN'"
 fi
 
 # ===========================================================================
