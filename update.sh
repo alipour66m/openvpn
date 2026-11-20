@@ -77,26 +77,71 @@ fi
 # مرحله 1: دریافت کد جدید از GitHub
 # ===========================================================================
 say "مرحله 1/6 — دریافت آخرین کد از GitHub..."
+
+REPO="alipour66m/openvpn"
+REF="main"
+# خواندن تنظیمات نصب قبلی
+if [[ -f "/etc/gasslight/install.conf" ]]; then
+    # shellcheck disable=SC1091
+    source /etc/gasslight/install.conf 2>/dev/null || true
+fi
+
 cd "$PANEL_DIR"
 
 if [[ -d ".git" ]]; then
+    # نصب با git clone — ساده‌ترین روش
     OLD_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    git fetch --quiet origin main
-    git reset --hard origin/main --quiet
+    git fetch --quiet origin "$REF"
+    git reset --hard "origin/$REF" --quiet
     NEW_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     if [[ "$OLD_COMMIT" == "$NEW_COMMIT" ]]; then
         ok "کد از قبل به‌روز بود ($NEW_COMMIT)"
     else
         ok "کد آپدیت شد: $OLD_COMMIT → $NEW_COMMIT"
     fi
+    NEW_COMMIT="${NEW_COMMIT}"
 else
-    warn "دایرکتوری git پیدا نشد، آپدیت git انجام نشد"
+    # نصب با install.sh (zip) — دانلود فایل‌های جدید
+    say "  پنل با zip نصب شده — دانلود فایل‌های جدید از GitHub..."
+    TMP_ZIP=$(mktemp /tmp/gasslight-update-XXXXXX.zip)
+    TMP_DIR=$(mktemp -d /tmp/gasslight-update-XXXXXX)
+    trap 'rm -rf "$TMP_ZIP" "$TMP_DIR"' EXIT
+
+    ZIP_URL="https://github.com/${REPO}/archive/refs/heads/${REF}.zip"
+    if curl -fsSL --max-time 60 --retry 3 -o "$TMP_ZIP" "$ZIP_URL"; then
+        unzip -q "$TMP_ZIP" -d "$TMP_DIR"
+        # پوشه داخل zip: openvpn-main/
+        SRC_DIR=$(find "$TMP_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)
+        if [[ -d "$SRC_DIR/panel" ]]; then
+            # فقط فایل‌های کد را کپی کن — نه data (users.json, ovpn, ...)
+            for d in panel portal core overlay scripts; do
+                if [[ -d "$SRC_DIR/$d" ]]; then
+                    cp -r "$SRC_DIR/$d" "$PANEL_DIR/"
+                    ok "  پوشه $d آپدیت شد"
+                fi
+            done
+            for f in update.sh install.sh README.md README.fa.md; do
+                if [[ -f "$SRC_DIR/$f" ]]; then
+                    cp "$SRC_DIR/$f" "$PANEL_DIR/"
+                fi
+            done
+            NEW_COMMIT=$(curl -fsSL "https://api.github.com/repos/${REPO}/commits/${REF}" 2>/dev/null \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['sha'][:7])" 2>/dev/null || echo "latest")
+            ok "کد آپدیت شد (commit: $NEW_COMMIT)"
+        else
+            warn "ساختار zip نامعتبر — آپدیت کد انجام نشد"
+            NEW_COMMIT="unknown"
+        fi
+    else
+        warn "دانلود zip از GitHub ناموفق بود"
+        NEW_COMMIT="unknown"
+    fi
 fi
 
 # ===========================================================================
-# مرحله 2: آپدیت پکیج‌های Python
+# مرحله 2: نصب پکیج‌های Python جدید
 # ===========================================================================
-say "مرحله 2/6 — آپدیت پکیج‌های Python..."
+say "مرحله 2/6 — نصب/بررسی پکیج‌های Python..."
 
 VENV=""
 for v in "$PANEL_DIR/venv" "$PANEL_DIR/.venv" "/opt/ovpn-venv"; do
@@ -108,30 +153,35 @@ done
 
 if [[ -n "$VENV" ]]; then
     PIP="$VENV/bin/pip"
+    PYTHON="$VENV/bin/python3"
     ok "محیط مجازی پیدا شد: $VENV"
+    # در venv می‌شه همه را upgrade کرد
+    "$PIP" install --quiet --upgrade maxminddb flask markupsafe werkzeug requests
 else
-    PIP="pip3"
-    warn "محیط مجازی پیدا نشد، از pip3 سیستم استفاده می‌شود"
-fi
+    # سیستم — فقط پکیج‌های جدید را نصب کن، آنچه Debian نصب کرده دست نزن
+    PYTHON="python3"
+    ok "محیط مجازی پیدا نشد — پکیج‌های ضروری نصب می‌شوند"
 
-# نصب پکیج‌ها (سازگار با Ubuntu 22/24 و سیستم‌های جدید)
-PIP_OPTS="--quiet --upgrade"
-# Ubuntu 23+ و Debian 12+ نیاز به --break-system-packages دارند
-if "$PIP" install --help 2>&1 | grep -q "break-system-packages"; then
-    if [[ -z "$VENV" ]]; then
-        PIP_OPTS="$PIP_OPTS --break-system-packages"
+    # maxminddb معمولاً روی سیستم نیست — نصب با --break-system-packages
+    if ! python3 -c "import maxminddb" 2>/dev/null; then
+        pip3 install --quiet --break-system-packages maxminddb \
+            || pip3 install --quiet maxminddb \
+            || warn "نصب maxminddb ناموفق — GeoIP کار نخواهد کرد"
+        ok "maxminddb نصب شد"
+    else
+        ok "maxminddb قبلاً نصب بود"
     fi
+
+    # بقیه پکیج‌ها را فقط اگر موجود نبودند نصب کن (بدون upgrade)
+    for pkg in flask markupsafe werkzeug requests; do
+        if ! python3 -c "import ${pkg//-/_}" 2>/dev/null; then
+            pip3 install --quiet --break-system-packages "$pkg" 2>/dev/null \
+                || pip3 install --quiet "$pkg" 2>/dev/null \
+                || warn "$pkg نصب نشد"
+        fi
+    done
 fi
-
-# shellcheck disable=SC2086
-"$PIP" install $PIP_OPTS \
-    maxminddb \
-    flask \
-    markupsafe \
-    werkzeug \
-    requests
-
-ok "پکیج‌ها آپدیت شدند"
+ok "پکیج‌های Python آماده هستند"
 
 # ===========================================================================
 # مرحله 3: دانلود GeoIP (Country-lite.mmdb)
